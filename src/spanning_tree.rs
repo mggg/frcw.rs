@@ -195,9 +195,10 @@ mod rmst {
         }
     }
 
-    /// Given an edge order (`edges_by_weight`), finds the minimum spanning tree of
-    /// `graph` using Kruskal's algorithm and inserts the tree into `buf`.
-    fn minimum_spanning_tree(
+    /// Given an edge order (`edges_by_weight`), uses a greedy algorithm
+    /// analogous to Kruskal's algorithm to find the "minimum" spanning tree
+    /// according to the given edge order.
+    fn greedy_spanning_tree(
         graph: &Graph,
         buf: &mut SpanningTreeBuffer,
         edges_by_weight: &Vec<Edge>,
@@ -248,7 +249,7 @@ mod rmst {
         ) {
             self.edges_by_weight.clone_from(&graph.edges);
             self.edges_by_weight.shuffle(rng);
-            minimum_spanning_tree(graph, buf, &self.edges_by_weight);
+            greedy_spanning_tree(graph, buf, &self.edges_by_weight);
         }
     }
 
@@ -285,12 +286,13 @@ mod rmst {
             rng.fill(&mut self.weights[..]);
             for (region_col, region_weight) in self.region_weights.iter() {
                 for (idx, edge) in graph.edges.iter().enumerate() {
-                    // Up weight for edges between nodes in the same region
-                    // so mst will more favorably pick edges between regions
-                    if graph.attr[region_col][edge.0] != "null" && graph.attr[region_col][edge.0] != "" &&
-                    graph.attr[region_col][edge.1] != "null" && graph.attr[region_col][edge.1] != "" &&
-                    graph.attr[region_col][edge.0] == graph.attr[region_col][edge.1] {
-                            self.weights[idx] += region_weight;
+                    if graph.attr[region_col][edge.0] == "null"
+                        || graph.attr[region_col][edge.0] == ""
+                        || graph.attr[region_col][edge.1] == "null"
+                        || graph.attr[region_col][edge.1] == ""
+                        || graph.attr[region_col][edge.0] != graph.attr[region_col][edge.1]
+                    {
+                        self.weights[idx] += region_weight;
                     }
                 }
             }
@@ -299,15 +301,17 @@ mod rmst {
             for (idx, &weight) in self.weights.iter().enumerate() {
                 self.weights_with_indices.push((idx, weight));
             }
+
+            // Sort the edges so that the largest weight is last.
             self.weights_with_indices
-                .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap().reverse());
+                .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
             self.edges_by_weight.clear();
             for (edge_idx, _) in self.weights_with_indices.iter() {
                 self.edges_by_weight.push(graph.edges[*edge_idx]);
             }
 
-            minimum_spanning_tree(graph, buf, &self.edges_by_weight);
+            greedy_spanning_tree(graph, buf, &self.edges_by_weight);
         }
     }
 }

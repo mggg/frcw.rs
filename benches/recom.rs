@@ -17,7 +17,9 @@ const RNG_SEED: u64 = 153434375;
 struct DummyWriter {}
 
 impl StatsWriter for DummyWriter {
-    fn init(&mut self, _graph: &Graph, _partition: &Partition) -> Result<(), std::io::Error> { Ok(())}
+    fn init(&mut self, _graph: &Graph, _partition: &Partition) -> Result<(), std::io::Error> {
+        Ok(())
+    }
 
     fn step(
         &mut self,
@@ -30,7 +32,13 @@ impl StatsWriter for DummyWriter {
         Ok(())
     }
 
-    fn close(&mut self) -> Result<(), std::io::Error> { Ok(())}
+    fn close(&mut self) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+}
+
+fn main() {
+    unimplemented!("This file has not been set up to run yet.");
 }
 
 // fn grid_single_thread_recom_benchmark(c: &mut Criterion) {

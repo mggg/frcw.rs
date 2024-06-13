@@ -123,12 +123,14 @@ checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
 
 [[package]]
 name = "binary-ensemble"
-version = "0.1.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26b79a285f14f79d96a86d019e178c01ea4fbaed41087deaf8be83215387f833"
+checksum = "33b15d09d94e161a9c57b4f47fa652bed1a84a9187f09fdaf324294841e1896c"
 dependencies = [
  "byteorder",
  "clap 4.5.4",
+ "pcompress",
+ "pipe",
  "serde_json",
  "xz2",
 ]
@@ -547,7 +549,7 @@ dependencies = [
 
 [[package]]
 name = "frcw"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "approx 0.5.1",
  "binary-ensemble",
@@ -1014,6 +1016,15 @@ checksum = "e1d3afd2628e69da2be385eb6f2fd57c8ac7977ceeff6dc166ff1657b0e386a9"
 dependencies = [
  "fixedbitset",
  "indexmap",
+]
+
+[[package]]
+name = "pipe"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c7b8f27da217eb966df4c58d4159ea939431950ca03cf782c22bd7c5c1d8d75"
+dependencies = [
+ "crossbeam-channel",
 ]
 
 [[package]]

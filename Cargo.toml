@@ -1,6 +1,6 @@
 [package]
 name = "frcw"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Parker J. Rule <parker.rule@tufts.edu>", "Peter Rock <peter.r.rock2@gmail.com>"]
 edition = "2021"
 
@@ -19,7 +19,7 @@ serde_json = "1.0.64"
 sha3 = "0.10.0"
 snafu = "0.7.0"
 itertools = "0.10.2"
-binary-ensemble = "^0.1.1"
+binary-ensemble = "^0.2.0"
 
 [dev-dependencies]
 rstest = "0.10.0"

@@ -438,7 +438,7 @@ impl StatsWriter for BenWriter {
             .map(|x| x + 1)
             .collect();
         self.output
-            .write_all(b"STANDARD BEN FILE")
+            .write_all(b"MKVCHAIN BEN FILE")
             .expect("Failed to write to output");
         self.output
             .write_all(
@@ -456,44 +456,37 @@ impl StatsWriter for BenWriter {
 
     fn step(
         &mut self,
-        step: u64,
+        _step: u64,
         _graph: &Graph,
         partition: &Partition,
         _proposal: &RecomProposal,
         counts: &SelfLoopCounts,
     ) -> Result<()> {
-        let tot_count = counts.sum();
-        for _ in step - tot_count as u64 + 1..step + 1 {
-            let assign = self
-                .previous_assignment
-                .iter()
-                .map(|&x| x as u16)
-                .collect::<Vec<u16>>();
-            self.output
-                .write_all(ben::encode::encode_ben_vec_from_assign(assign).as_slice())
-                .expect("Failed to write output")
-        }
+        // The first step plus the number of self loops
+        let tot_count = counts.sum() + 1;
+        self.output.write_all(&(tot_count as u16).to_be_bytes())?;
         self.previous_assignment = partition
             .assignments
             .clone()
             .iter()
             .map(|x| x + 1)
             .collect();
+        let new_vec = ben::encode::encode_ben_vec_from_assign(
+            (&self.previous_assignment)
+                .iter()
+                .map(|&x| x as u16)
+                .collect(),
+        );
         self.output
-            .write_all(
-                ben::encode::encode_ben_vec_from_assign(
-                    (&self.previous_assignment)
-                        .iter()
-                        .map(|&x| x as u16)
-                        .collect(),
-                )
-                .as_slice(),
-            )
+            .write_all(new_vec.as_slice())
             .expect("Failed to write to output");
         Ok(())
     }
 
     fn close(&mut self) -> Result<()> {
+        // The very last step is always counted as 1 since we hit that
+        // step and then we stop drawing.
+        self.output.write_all(&[0u8, 1u8])?;
         Ok(())
     }
 }
@@ -524,6 +517,15 @@ impl StatsWriter for PcompressWriter {
         proposal: &RecomProposal,
         counts: &SelfLoopCounts,
     ) -> Result<()> {
+        // Write out self-loops first. The counts here
+        // are the number of self-loops since the last
+        // accepted proposal (i.e. the number of times the
+        // last proposal was repeated before acceptance).
+        self.diff.reset();
+        for _ in 0..counts.sum() {
+            export_diff(&mut self.writer, &self.diff);
+        }
+
         // Write out the actual delta.
         self.diff.reset();
         for &node in proposal.a_nodes.iter() {
@@ -534,11 +536,6 @@ impl StatsWriter for PcompressWriter {
         }
         export_diff(&mut self.writer, &self.diff);
 
-        // Write out self-loops.
-        self.diff.reset();
-        for _ in 0..counts.sum() {
-            export_diff(&mut self.writer, &self.diff);
-        }
         Ok(())
     }
 
