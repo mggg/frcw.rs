@@ -292,6 +292,11 @@ impl ScoresWriter {
         }
     }
 
+    /// Flushes any buffered score rows to the underlying writer.
+    pub fn flush(&mut self) -> Result<()> {
+        self.output.flush()
+    }
+
     pub fn close(&mut self) -> Result<()> {
         self.output.flush()
     }

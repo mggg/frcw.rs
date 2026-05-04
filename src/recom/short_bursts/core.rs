@@ -152,8 +152,11 @@ fn run_burst_worker<B>(
 /// thread is called only when a new global best is found, and sample numbers
 /// count improvements.
 ///
-/// `scores_writer` is always called only when a new global best is found;
-/// its step number reflects the total accepted steps at that burst boundary.
+/// `scores_writer` mirrors `stats_writer`: one row per accepted chain step
+/// when `write_best_only = false`, one row per new global best when
+/// `write_best_only = true`. Each row carries the step's score, the running
+/// global best, and (on new bests) per-district scores; non-best rows omit
+/// district scores so the writer replays its last cached vector.
 ///
 /// Because short-bursts workers return full partitions (not individual
 /// proposals), the stats writer thread receives a synthetic empty proposal on
@@ -297,6 +300,10 @@ where
         }
 
         let mut score = initial_score;
+        // Running global-best score, monotone non-decreasing under maximize
+        // (non-increasing under minimize). Reported as `best_score` on every
+        // score-writer row.
+        let mut best_score: f64 = initial_score;
         // Main thread's canonical state, kept in sync with `partition` so the
         // score writer can report fresh per-district scores after a new best.
         let mut best_state: B::State = initial_state;
@@ -314,7 +321,8 @@ where
             let mut diff: Option<Partition> = None;
 
             if write_best_only {
-                // Emit only on new global bests.
+                // Emit only on new global bests; one stats + one score row per
+                // improvement.
                 for packet in all_packets {
                     if let Some((bp, bs)) = packet.best {
                         if (maximize && bs >= score) || (!maximize && bs <= score) {
@@ -322,6 +330,11 @@ where
                             score = bs;
                             diff = Some(partition.clone());
                             best_state = backend.init_state(graph, &partition);
+                            let strict_improvement = (maximize && bs > best_score)
+                                || (!maximize && bs < best_score);
+                            if strict_improvement {
+                                best_score = bs;
+                            }
                             writer_step += 1;
                             if let Some(send) = stats_send.as_ref() {
                                 send.send(BurstStatsPacket {
@@ -331,49 +344,71 @@ where
                                 })
                                 .unwrap();
                             }
-                        }
-                    }
-                }
-            } else {
-                // Emit every accepted step; cap writes at effective_steps so
-                // total records (init seed + per-step) equal params.num_steps.
-                for packet in all_packets {
-                    for (stepped_partition, stepped_score) in packet.all_steps {
-                        if writer_step < effective_steps {
-                            writer_step += 1;
-                            if let Some(send) = stats_send.as_ref() {
-                                send.send(BurstStatsPacket {
+                            if let Some(send) = score_send.as_ref() {
+                                let ds = backend.step_district_scores(&best_state);
+                                send.send(BurstScorePacket {
                                     step: writer_step,
-                                    partition: Some(stepped_partition.clone()),
+                                    score: bs,
+                                    best_score,
+                                    district_scores: ds,
                                     terminate: false,
                                 })
                                 .unwrap();
                             }
                         }
-                        if (maximize && stepped_score >= score)
-                            || (!maximize && stepped_score <= score)
-                        {
-                            partition = stepped_partition;
+                    }
+                }
+            } else {
+                // Emit every accepted step. The stats writer is capped at
+                // effective_steps so total records (init seed + per-step)
+                // equal params.num_steps; the score writer matches that cap.
+                for packet in all_packets {
+                    for (stepped_partition, stepped_score) in packet.all_steps {
+                        if writer_step >= effective_steps {
+                            break;
+                        }
+                        writer_step += 1;
+                        let is_chain_best = (maximize && stepped_score >= score)
+                            || (!maximize && stepped_score <= score);
+                        let strict_improvement = (maximize && stepped_score > best_score)
+                            || (!maximize && stepped_score < best_score);
+                        if is_chain_best {
+                            partition = stepped_partition.clone();
                             score = stepped_score;
                             diff = Some(partition.clone());
                             best_state = backend.init_state(graph, &partition);
+                            if strict_improvement {
+                                best_score = stepped_score;
+                            }
+                        }
+                        if let Some(send) = stats_send.as_ref() {
+                            send.send(BurstStatsPacket {
+                                step: writer_step,
+                                partition: Some(stepped_partition),
+                                terminate: false,
+                            })
+                            .unwrap();
+                        }
+                        if let Some(send) = score_send.as_ref() {
+                            // Per-district scores are only fresh when the
+                            // canonical chain advanced to a new best;
+                            // otherwise the writer caches and replays the
+                            // last vector via `None`.
+                            let ds = if strict_improvement {
+                                backend.step_district_scores(&best_state)
+                            } else {
+                                None
+                            };
+                            send.send(BurstScorePacket {
+                                step: writer_step,
+                                score: stepped_score,
+                                best_score,
+                                district_scores: ds,
+                                terminate: false,
+                            })
+                            .unwrap();
                         }
                     }
-                }
-            }
-
-            // Score writer fires only when a new global best was found this round.
-            if diff.is_some() {
-                if let Some(send) = score_send.as_ref() {
-                    let ds = backend.step_district_scores(&best_state);
-                    send.send(BurstScorePacket {
-                        step,
-                        score,
-                        best_score: score,
-                        district_scores: ds,
-                        terminate: false,
-                    })
-                    .unwrap();
                 }
             }
 

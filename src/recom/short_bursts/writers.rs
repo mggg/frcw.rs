@@ -76,6 +76,7 @@ pub(super) fn start_burst_score_writer(
     writer
         .init(initial_score, &initial_district_scores)
         .unwrap();
+    writer.flush().unwrap();
     let mut last_districts = initial_district_scores;
     let mut next = recv.recv().unwrap();
     while !next.terminate {
@@ -85,6 +86,7 @@ pub(super) fn start_burst_score_writer(
         writer
             .step(next.step, next.score, next.best_score, &last_districts)
             .unwrap();
+        writer.flush().unwrap();
         next = recv.recv().unwrap();
     }
     writer.close().unwrap();

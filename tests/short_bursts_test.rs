@@ -352,18 +352,18 @@ fn test_short_bursts_write_best_only_cross_validation() {
         }
     }
 
-    // The scores CSV must have exactly one data row per new global best
-    // (matching the write_best_only=true writer call count).
+    // Run 1 used write_best_only=false, so the scores CSV records one row
+    // per accepted chain step (matching the all-steps stats writer).
     let scores_content = fs::read_to_string(&scores_path).unwrap();
     let scores_lines: Vec<&str> = scores_content.lines().collect();
     // lines[0] = header, lines[1] = init row at step 0, lines[2..] = data rows.
     let data_rows = scores_lines.len().saturating_sub(2);
     assert_eq!(
         data_rows,
-        best_writer.partitions.len(),
-        "scores CSV has {} data rows but {} new global bests were found",
+        all_writer.partitions.len(),
+        "scores CSV has {} data rows but the per-step stats writer recorded {}",
         data_rows,
-        best_writer.partitions.len()
+        all_writer.partitions.len()
     );
 
     // best_score column must be strictly non-decreasing.
