@@ -535,13 +535,29 @@ fn main() {
         "num_steps": n_steps,
         "type": "tilted_run",
         "accept_rule": accept_rule_str,
-        "accept_worse_prob": accept_worse_prob,
-        "metropolis_beta": metropolis_beta,
         "maximize": maximize,
         "overwrite_output": overwrite_output,
         "show_progress": show_progress,
         "graph_json": graph_json,
     });
+    // Emit only the parameter relevant to the active acceptance rule.
+    match accept_rule_str.as_str() {
+        "fixed" => {
+            if let Some(prob) = accept_worse_prob {
+                meta.as_object_mut()
+                    .unwrap()
+                    .insert("accept_worse_prob".to_string(), json!(prob));
+            }
+        }
+        "metropolis" => {
+            if let Some(beta) = metropolis_beta {
+                meta.as_object_mut()
+                    .unwrap()
+                    .insert("metropolis_beta".to_string(), json!(beta));
+            }
+        }
+        _ => {}
+    }
     if let Some(path) = matches.get_one::<String>("output-file") {
         meta.as_object_mut()
             .unwrap()
