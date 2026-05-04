@@ -570,6 +570,7 @@ fn main() {
         .map(|path| output_buffer(path.to_str().unwrap(), overwrite_output));
     if let Some(writer) = metadata_writer.as_mut() {
         writeln!(writer, "{}", json!({ "meta": meta })).unwrap();
+        writer.flush().unwrap();
     }
 
     let mut stats_writer: Option<Box<dyn StatsWriter>> =
