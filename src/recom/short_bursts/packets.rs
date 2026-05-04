@@ -4,29 +4,50 @@
 
 use crossbeam_channel::Sender;
 
+use super::super::RecomProposal;
 use crate::partition::Partition;
+
+/// Instruction from the main thread to a worker between rounds.
+///
+/// `Apply` is the common case: the canonical chain advanced by a single
+/// accepted proposal, so each worker patches its partition copy
+/// incrementally. `Reset` is sent at burst boundaries when the main thread
+/// snaps the chain back to the best plan seen during the burst (which may
+/// be many steps behind the worker's current state); workers replace their
+/// partition wholesale and rebuild backend state. `None` means no state
+/// change since the last batch (only used for the very first round).
+pub(super) enum BurstDiff {
+    None,
+    Apply(RecomProposal),
+    Reset(Partition),
+}
 
 /// A unit of work sent from the main thread to a worker.
 pub(super) struct BurstJobPacket {
-    /// The number of accepted steps to sample in this burst.
-    pub(super) n_steps: usize,
-    /// The full canonical partition for the next burst, when the main thread
-    /// has rolled forward to a new global best. `None` means continue from the
-    /// worker's current state.
-    pub(super) diff: Option<Partition>,
+    /// State change to apply before drawing the next proposal.
+    pub(super) diff: BurstDiff,
     /// A sentinel used to kill the worker thread.
     pub(super) terminate: bool,
 }
 
-/// The result of one burst from a worker.
+/// One worker-drawn candidate proposal, plus the score it would produce if
+/// applied to the current canonical chain state.
+pub(super) struct ScoredProposal {
+    /// Random ID used for deterministic interleaving across worker arrivals
+    /// (same technique as `run.rs` and `tilted::core.rs`).
+    pub(super) id: u64,
+    /// The candidate proposal.
+    pub(super) proposal: RecomProposal,
+    /// Objective score after applying `proposal` to the worker's local copy.
+    pub(super) score: f64,
+}
+
+/// The result of one round of work from a worker. Always carries one
+/// successful proposal -- workers retry internally on failed tree draws or
+/// disconnected merges and never report self-loops, since short bursts has
+/// no within-chain rejection.
 pub(super) struct BurstResult {
-    /// Every accepted step in the burst, in chronological order. Each entry is
-    /// `(partition_after_step, score_of_partition)`. Empty when
-    /// `collect_trace = false` was passed to the worker.
-    pub(super) all_steps: Vec<(Partition, f64)>,
-    /// The burst-end best partition and score (the merge candidate). `None` if
-    /// the burst produced no accepted steps.
-    pub(super) best: Option<(Partition, f64)>,
+    pub(super) proposal: ScoredProposal,
 }
 
 /// A chain-statistics write packet sent from the main thread to the stats
@@ -49,33 +70,39 @@ pub(super) struct BurstScorePacket {
     pub(super) score: f64,
     /// Best score seen so far.
     pub(super) best_score: f64,
-    /// Per-district scores to carry forward from this point on, if the chain
-    /// state changed. `None` reuses the writer's previously cached vector.
+    /// Per-district scores to carry forward, or `None` to reuse the writer's
+    /// previously cached vector.
     pub(super) district_scores: Option<Vec<f64>>,
     /// A sentinel used to stop the writer thread.
     pub(super) terminate: bool,
 }
 
-/// Sends a batch of work to a short-bursts worker thread.
-pub(super) fn send_burst_batch(
-    send: &Sender<BurstJobPacket>,
-    diff: Option<Partition>,
-    burst_length: usize,
-) {
-    send.send(BurstJobPacket {
-        n_steps: burst_length,
-        diff,
-        terminate: false,
-    })
-    .unwrap();
+/// Sends the same diff to every worker.
+pub(super) fn broadcast_diff(job_sends: &[Sender<BurstJobPacket>], diff: &BurstDiff) {
+    for job in job_sends.iter() {
+        job.send(BurstJobPacket {
+            diff: diff.clone(),
+            terminate: false,
+        })
+        .unwrap();
+    }
 }
 
 /// Stops a short-bursts worker thread.
 pub(super) fn terminate_burst_worker(send: &Sender<BurstJobPacket>) {
     send.send(BurstJobPacket {
-        n_steps: 0,
-        diff: None,
+        diff: BurstDiff::None,
         terminate: true,
     })
     .unwrap();
+}
+
+impl Clone for BurstDiff {
+    fn clone(&self) -> Self {
+        match self {
+            BurstDiff::None => BurstDiff::None,
+            BurstDiff::Apply(p) => BurstDiff::Apply(p.clone()),
+            BurstDiff::Reset(p) => BurstDiff::Reset(p.clone()),
+        }
+    }
 }

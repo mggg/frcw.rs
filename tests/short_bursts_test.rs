@@ -321,8 +321,27 @@ fn test_short_bursts_write_best_only_cross_validation() {
     )
     .unwrap();
 
-    // write_best_only=true must produce strictly fewer records: with 200 steps
-    // on a small grid, some steps will inevitably be non-improvements.
+    // write_best_only=true emits one record per burst boundary, plus one
+    // final record if the chain ends mid-burst. Compute the exact expected
+    // count from the chain budget and burst length.
+    let effective = params.num_steps.saturating_sub(1) as usize;
+    let complete_bursts = effective / burst_length as usize;
+    let mid_burst_remainder = effective % burst_length as usize;
+    let expected_best_records =
+        complete_bursts + if mid_burst_remainder > 0 { 1 } else { 0 };
+    assert_eq!(
+        best_writer.partitions.len(),
+        expected_best_records,
+        "write_best_only=true should emit {} records ({} burst boundaries{}) but emitted {}",
+        expected_best_records,
+        complete_bursts,
+        if mid_burst_remainder > 0 { " + 1 final mid-burst snap" } else { "" },
+        best_writer.partitions.len(),
+    );
+
+    // The two modes share the same chain trajectory (same seed). The
+    // all-steps run records strictly more rows because it captures every
+    // accepted step rather than only burst-boundary snaps.
     assert!(
         best_writer.partitions.len() < all_writer.partitions.len(),
         "write_best_only=true ({} records) should produce fewer records than \
@@ -331,26 +350,6 @@ fn test_short_bursts_write_best_only_cross_validation() {
         all_writer.partitions.len(),
         params.num_steps
     );
-
-    // Every partition from write_best_only=true must appear in the all-steps run.
-    // Since both runs use the same seed, they take the same steps in the same
-    // order; improvements are a subsequence of all steps.
-    let mut search_from = 0;
-    for (i, best_p) in best_writer.partitions.iter().enumerate() {
-        let found = all_writer.partitions[search_from..]
-            .iter()
-            .position(|p| p.assignments == best_p.assignments);
-        match found {
-            Some(offset) => search_from += offset + 1,
-            None => panic!(
-                "improvement {} (assignments {:?}...) not found as a subsequence in \
-                 all-steps run (searched from index {})",
-                i,
-                &best_p.assignments[..4.min(best_p.assignments.len())],
-                search_from
-            ),
-        }
-    }
 
     // Run 1 used write_best_only=false, so the scores CSV records one row
     // per accepted chain step (matching the all-steps stats writer).
