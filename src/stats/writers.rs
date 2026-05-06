@@ -96,6 +96,10 @@ pub struct CanonicalWriter {
 pub struct BenWriter {
     previous_assignment: Vec<u32>,
     output: Box<dyn Write + Send>,
+    /// Self-loop count accumulated at the final plan after the last
+    /// accepted step, reported via [`StatsWriter::self_loop`] and folded
+    /// into the final segment's count by [`StatsWriter::close`].
+    trailing_self_loops: u64,
 }
 
 /// Writes assignments in Max Fan's `pcompress` binary format.
@@ -189,6 +193,7 @@ impl BenWriter {
         BenWriter {
             previous_assignment: Vec::new(),
             output: output,
+            trailing_self_loops: 0,
         }
     }
 }
@@ -615,10 +620,29 @@ impl StatsWriter for BenWriter {
         Ok(())
     }
 
+    fn self_loop(
+        &mut self,
+        _step: u64,
+        _graph: &Graph,
+        _partition: &Partition,
+        counts: &SelfLoopCounts,
+    ) -> Result<()> {
+        // Trailing rejections occur at the final plan and must be folded
+        // into its segment count by `close`. The runner emits one
+        // `self_loop` call per pending self-loop batch; accumulate
+        // defensively in case there are several.
+        self.trailing_self_loops += counts.sum() as u64;
+        Ok(())
+    }
+
     fn close(&mut self) -> Result<()> {
-        // The very last step is always counted as 1 since we hit that
-        // step and then we stop drawing.
-        self.output.write_all(&[0u8, 1u8])?;
+        // The final segment's count is the number of trailing rejections
+        // at the last plan, plus 1 for the arriving-accept step counted
+        // at the new plan (mirrors how `step` writes `counts.sum() + 1`).
+        // Without this fix, chains that end on a rejection are encoded
+        // shorter than chains of equal `num_steps` that end on an accept.
+        let final_count = self.trailing_self_loops.saturating_add(1) as u16;
+        self.output.write_all(&final_count.to_be_bytes())?;
         Ok(())
     }
 }

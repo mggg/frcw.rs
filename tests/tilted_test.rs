@@ -363,9 +363,12 @@ fn test_tilted_stats_writer_records_accepted_steps() {
     )
     .unwrap();
     assert_eq!(stats_writer.init_calls, 1);
+    // The chain produces (num_steps - 1) events of its own (init seed
+    // counts as the first record), so stats_writer.step is invoked for
+    // chain steps 1..=num_steps - 1.
     assert_eq!(
         stats_writer.steps,
-        (1..=params.num_steps)
+        (1..=(params.num_steps - 1))
             .map(|step| (step, 0))
             .collect::<Vec<_>>()
     );
@@ -408,7 +411,8 @@ fn test_tilted_scores_writer_records_every_step() {
     let scores = fs::read_to_string(&path).unwrap();
     let lines = scores.lines().collect::<Vec<_>>();
     assert_eq!(lines[0], "step,score,best_score");
-    assert_eq!(lines.len(), params.num_steps as usize + 2);
+    // header + init seed row + (num_steps - 1) chain events = num_steps + 1 lines
+    assert_eq!(lines.len(), params.num_steps as usize + 1);
 
     let mut previous_best = f64::NEG_INFINITY;
     for (idx, line) in lines.iter().enumerate().skip(1) {
@@ -474,11 +478,12 @@ fn test_tilted_canonical_writer_mixed_ending_counts(
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .collect();
+    // Init seed plan + (num_steps - 1) chain events = num_steps records.
     assert_eq!(
         records.len(),
-        params.num_steps as usize + 1,
+        params.num_steps as usize,
         "expected {} records but got {} (n_threads={}, accept_worse_prob={}, seed={})",
-        params.num_steps as usize + 1,
+        params.num_steps as usize,
         records.len(),
         n_threads,
         accept_worse_prob,
@@ -488,10 +493,10 @@ fn test_tilted_canonical_writer_mixed_ending_counts(
         .iter()
         .map(|r| r["sample"].as_u64().unwrap())
         .collect();
-    let expected: Vec<u64> = (1..=(params.num_steps + 1)).collect();
+    let expected: Vec<u64> = (1..=params.num_steps).collect();
     let expected = if samples.first().copied() == Some(1) && samples.get(1).copied() == Some(1) {
         let mut v = vec![1u64];
-        v.extend(1..=params.num_steps);
+        v.extend(1..=(params.num_steps - 1));
         v
     } else {
         expected
@@ -552,10 +557,10 @@ fn test_tilted_canonical_writer_flushes_terminal_self_loops() {
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(records.len(), params.num_steps as usize + 1);
+    assert_eq!(records.len(), params.num_steps as usize);
     assert_eq!(
         records.last().unwrap()["sample"].as_u64().unwrap(),
-        params.num_steps
+        params.num_steps - 1
     );
     let final_assignment = final_partition
         .assignments

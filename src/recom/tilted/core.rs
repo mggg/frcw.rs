@@ -305,7 +305,7 @@ fn interleave_tilted_round<B>(
     state: &mut TiltedMainState<B::State>,
     mut loops: usize,
     mut proposals: Vec<ScoredProposal>,
-    params: &RecomParams,
+    effective_steps: u64,
     rng: &mut SmallRng,
     job_sends: &[Sender<TiltedJobPacket>],
     maximize: bool,
@@ -315,7 +315,7 @@ fn interleave_tilted_round<B>(
     B: ScoringBackend,
 {
     if proposals.is_empty() {
-        let remaining = (params.num_steps - state.step) as usize;
+        let remaining = effective_steps.saturating_sub(state.step) as usize;
         state.record_rejections(loops.min(remaining), score_send);
         send_tilted_jobs(job_sends, None, state.current_score);
         return;
@@ -323,7 +323,7 @@ fn interleave_tilted_round<B>(
 
     proposals.sort_by_key(|proposal| proposal.id);
     let mut total = loops + proposals.len();
-    while total > 0 && state.step < params.num_steps {
+    while total > 0 && state.step < effective_steps {
         let event = rng.random_range(0..total);
         if event < loops {
             state.record_rejections(1, score_send);
@@ -358,6 +358,7 @@ fn run_tilted_main_loop<B>(
     backend: &B,
     state: &mut TiltedMainState<B::State>,
     params: &RecomParams,
+    effective_steps: u64,
     n_threads: usize,
     result_recv: &Receiver<TiltedResultPacket>,
     job_sends: &[Sender<TiltedJobPacket>],
@@ -369,22 +370,34 @@ fn run_tilted_main_loop<B>(
 ) where
     B: ScoringBackend,
 {
-    if params.num_steps > 0 {
+    if effective_steps > 0 {
         send_tilted_jobs(job_sends, None, state.current_score);
     }
 
     let progress_chunk = (params.num_steps / 1000 + 1).min(1000);
     let mut last_drawn = state.step;
-    while state.step < params.num_steps {
+    while state.step < effective_steps {
         let (loops, proposals) = collect_tilted_results(result_recv, n_threads);
         interleave_tilted_round(
-            graph, backend, state, loops, proposals, params, rng, job_sends, maximize, stats_send,
+            graph,
+            backend,
+            state,
+            loops,
+            proposals,
+            effective_steps,
+            rng,
+            job_sends,
+            maximize,
+            stats_send,
             score_send,
         );
         if let Some(progress_bar) = progress_bar {
-            if state.step - last_drawn >= progress_chunk || state.step == params.num_steps {
-                progress_bar.set_position(state.step);
-                last_drawn = state.step;
+            // Progress = records emitted so far (init seed + accepted/
+            // rejected steps). Goal = params.num_steps records total.
+            let drawn = state.step + 1;
+            if drawn - last_drawn >= progress_chunk || state.step == effective_steps {
+                progress_bar.set_position(drawn);
+                last_drawn = drawn;
             }
         }
     }
@@ -570,6 +583,12 @@ where
         return Err("Reversible ReCom is not supported by the tilted run optimizer.".to_string());
     }
 
+    // The stats writer emits the seed plan in `init`, which counts as the
+    // first output record. The chain produces num_steps - 1 events of its
+    // own so that the total output record count equals num_steps -- the
+    // same convention used by `multi_chain` and `multi_short_bursts`.
+    let effective_steps = params.num_steps.saturating_sub(1);
+
     let node_ub = node_bound(&graph.pops, params.max_pop);
 
     let mut job_sends = vec![];
@@ -658,6 +677,7 @@ where
             &backend,
             &mut state,
             params,
+            effective_steps,
             n_threads,
             &result_recv,
             &job_sends,
