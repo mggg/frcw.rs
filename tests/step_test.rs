@@ -299,7 +299,9 @@ fn test_chain_invariants_recom_grid(
         region_weights: None,
     };
     let writer = Box::new(StepInvariantWriter::new(params.clone(), true)) as Box<dyn StatsWriter>;
-    multi_chain(&graph, &partition, writer, &params, n_threads, batch_size);
+    let _ = multi_chain(
+        &graph, &partition, writer, &params, n_threads, batch_size, false,
+    );
 }
 
 #[rstest]
@@ -320,7 +322,9 @@ fn test_chain_invariants_revrecom_grid(
         region_weights: None,
     };
     let writer = Box::new(StepInvariantWriter::new(params.clone(), true)) as Box<dyn StatsWriter>;
-    multi_chain(&graph, &partition, writer, &params, n_threads, batch_size);
+    let _ = multi_chain(
+        &graph, &partition, writer, &params, n_threads, batch_size, false,
+    );
 }
 
 #[rstest]
@@ -342,15 +346,17 @@ fn test_chain_invariants_recom_iowa(
         region_weights: None,
     };
     let writer = Box::new(StepInvariantWriter::new(params.clone(), true)) as Box<dyn StatsWriter>;
-    multi_chain(&graph, &partition, writer, &params, n_threads, batch_size);
+    let _ = multi_chain(
+        &graph, &partition, writer, &params, n_threads, batch_size, false,
+    );
 }
 
 #[rstest]
 fn test_chain_invariants_revrecom_iowa(
     #[values((0.01, 10), (0.2, 20))] pop_tol_balance_ub: (f64, u32),
     #[values(1, 4)] n_threads: usize,
-    #[values(1,24)] batch_size: usize,   // Peter note: This will fail when the batch size is exactly 16. 
-                                         // All other values from 1-32 pass. This should be investigated.
+    #[values(1, 24)] batch_size: usize, // Peter note: This will fail when the batch size is exactly 16.
+                                        // All other values from 1-32 pass. This should be investigated.
 ) {
     let (graph, partition) = default_fixture("IA");
     let avg_pop = (graph.total_pop as f64) / (partition.num_dists as f64);
@@ -366,11 +372,12 @@ fn test_chain_invariants_revrecom_iowa(
         region_weights: None,
     };
     let writer = Box::new(StepInvariantWriter::new(params.clone(), true)) as Box<dyn StatsWriter>;
-    multi_chain(&graph, &partition, writer, &params, n_threads, batch_size);
+    let _ = multi_chain(
+        &graph, &partition, writer, &params, n_threads, batch_size, false,
+    );
 }
 
 #[rstest]
-#[ignore]
 fn test_chain_invariants_revrecom_large_states(
     #[values("PA", "VA")] state: &str,
     #[values(25000)] num_steps: u64,
@@ -390,5 +397,7 @@ fn test_chain_invariants_revrecom_large_states(
         region_weights: None,
     };
     let writer = Box::new(StepInvariantWriter::new(params.clone(), false)) as Box<dyn StatsWriter>;
-    multi_chain(&graph, &partition, writer, &params, n_threads, batch_size);
+    let _ = multi_chain(
+        &graph, &partition, writer, &params, n_threads, batch_size, false,
+    );
 }

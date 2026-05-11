@@ -17,6 +17,19 @@ use sha3::{Digest, Sha3_256};
 use std::path::PathBuf;
 use std::{fs, io};
 
+const OUTPUT_BUFFER_CAPACITY: usize = 128 * 1024;
+
+fn output_buffer(path: &str, overwrite_output: bool) -> Box<dyn io::Write + Send> {
+    let path = std::path::Path::new(path);
+    if path.exists() && !overwrite_output {
+        panic!("Output file already exists. Use --overwrite-output to replace it.");
+    };
+    Box::new(io::BufWriter::with_capacity(
+        OUTPUT_BUFFER_CAPACITY,
+        fs::File::create(path).unwrap(),
+    ))
+}
+
 fn main() {
     let mut cli =
         Command::new("frcw")
@@ -163,6 +176,12 @@ fn main() {
                 "The path to write the output to. If not provided, ouput is printed to console.",
             ))
             .arg(
+                Arg::new("overwrite-output")
+                    .long("overwrite-output")
+                    .action(ArgAction::SetTrue)
+                    .help("Overwrite existing output files instead of failing."),
+            )
+            .arg(
                 Arg::new("show-progress")
                     .long("show-progress")
                     .action(ArgAction::SetTrue)
@@ -233,6 +252,7 @@ fn main() {
         .get_one::<String>("writer")
         .expect("writer has a default value")
         .as_str();
+    let overwrite_output = matches.get_flag("overwrite-output");
 
     let st_counts = if cfg!(feature = "linalg") {
         matches.get_flag("spanning_tree_counts")
@@ -259,14 +279,11 @@ fn main() {
     };
 
     let output_buffer: Box<dyn io::Write + Send> = match matches.get_one::<String>("output-file") {
-        Some(path) => {
-            let path = std::path::Path::new(path);
-            if path.exists() {
-                panic!("Output file already exists.");
-            };
-            Box::new(io::BufWriter::new(fs::File::create(path).unwrap()))
-        }
-        None => Box::new(io::BufWriter::new(std::io::stdout())),
+        Some(path) => output_buffer(path, overwrite_output),
+        None => Box::new(io::BufWriter::with_capacity(
+            OUTPUT_BUFFER_CAPACITY,
+            std::io::stdout(),
+        )),
     };
 
     let writer: Box<dyn StatsWriter> = match writer_str {
@@ -309,7 +326,20 @@ fn main() {
         }
     }
 
-    let (graph, partition) = from_networkx(&graph_json, pop_col, assignment_col, sum_cols).unwrap();
+    let (graph, partition) = from_networkx(
+        &graph_json,
+        pop_col,
+        assignment_col,
+        sum_cols,
+        vec![],
+        vec![],
+    )
+        .unwrap_or_else(|e| {
+            panic!(
+                "Could not load graph and partition from {}: {}",
+                graph_json, e
+            )
+        });
 
     let target_pop = match target_pop_opt {
         Some(p) => p as f64,
@@ -347,6 +377,14 @@ fn main() {
         "graph_json": graph_json,
         "chain_variant": variant_str,
     });
+    if let Some(path) = matches.get_one::<String>("output-file") {
+        meta.as_object_mut()
+            .unwrap()
+            .insert("output_file".to_string(), json!(path));
+        meta.as_object_mut()
+            .unwrap()
+            .insert("overwrite_output".to_string(), json!(overwrite_output));
+    }
     if variant == RecomVariant::Reversible {
         meta.as_object_mut()
             .unwrap()

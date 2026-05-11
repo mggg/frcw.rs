@@ -69,6 +69,72 @@ impl Partition {
         self.dist_adj = None;
     }
 
+    /// Applies a proposal and, if `dist_adj` is already cached, patches it in
+    /// place rather than invalidating it. Use from hot paths that call
+    /// `dist_adj` every draw so the cache survives every accepted proposal.
+    ///
+    /// `cut_edges` is still invalidated because it is not needed by the tilted
+    /// runner.
+    pub fn update_with_dist_adj(&mut self, proposal: &RecomProposal, graph: &Graph) {
+        if self.dist_adj.is_none() {
+            self.update(proposal);
+            return;
+        }
+
+        let num_dists = self.num_dists as usize;
+        let n = self.assignments.len();
+        let mut affected = vec![false; n];
+        for &node in proposal.a_nodes.iter() {
+            affected[node] = true;
+        }
+        for &node in proposal.b_nodes.iter() {
+            affected[node] = true;
+        }
+
+        let dist_adj = self.dist_adj.as_mut().unwrap();
+        for &node in proposal.a_nodes.iter().chain(proposal.b_nodes.iter()) {
+            let d_node = self.assignments[node] as usize;
+            for &nbr in graph.neighbors[node].iter() {
+                if affected[nbr] && nbr < node {
+                    continue;
+                }
+                let d_nbr = self.assignments[nbr] as usize;
+                if d_node != d_nbr {
+                    dist_adj[d_node * num_dists + d_nbr] -= 1;
+                    dist_adj[d_nbr * num_dists + d_node] -= 1;
+                }
+            }
+        }
+
+        self.dist_nodes[proposal.a_label] = proposal.a_nodes.clone();
+        self.dist_nodes[proposal.b_label] = proposal.b_nodes.clone();
+        self.dist_pops[proposal.a_label] = proposal.a_pop;
+        self.dist_pops[proposal.b_label] = proposal.b_pop;
+        for &node in proposal.a_nodes.iter() {
+            self.assignments[node] = proposal.a_label as u32;
+        }
+        for &node in proposal.b_nodes.iter() {
+            self.assignments[node] = proposal.b_label as u32;
+        }
+
+        let dist_adj = self.dist_adj.as_mut().unwrap();
+        for &node in proposal.a_nodes.iter().chain(proposal.b_nodes.iter()) {
+            let d_node = self.assignments[node] as usize;
+            for &nbr in graph.neighbors[node].iter() {
+                if affected[nbr] && nbr < node {
+                    continue;
+                }
+                let d_nbr = self.assignments[nbr] as usize;
+                if d_node != d_nbr {
+                    dist_adj[d_node * num_dists + d_nbr] += 1;
+                    dist_adj[d_nbr * num_dists + d_node] += 1;
+                }
+            }
+        }
+
+        self.cut_edges = None;
+    }
+
     /// Computes the partition's cut edges.
     pub fn cut_edges(&mut self, graph: &Graph) -> &Vec<usize> {
         if self.cut_edges.is_none() {
@@ -351,5 +417,71 @@ mod tests {
                 parse_error: "invalid digit found in string".to_string()
             }
         );
+    }
+
+    #[test]
+    fn update_with_dist_adj_matches_full_rebuild() {
+        let grid = Graph::rect_grid(4, 4);
+        let assignments: Vec<u32> = vec![1, 1, 2, 2, 1, 1, 2, 2, 3, 3, 4, 4, 3, 3, 4, 4];
+        let mut incremental = Partition::from_assignments(&grid, &assignments).unwrap();
+        let _ = incremental.dist_adj(&grid);
+
+        let proposal = RecomProposal {
+            a_label: 0,
+            b_label: 1,
+            a_pop: 4,
+            b_pop: 4,
+            a_nodes: vec![0, 1, 4, 5],
+            b_nodes: vec![2, 3, 6, 7],
+        };
+        incremental.update_with_dist_adj(&proposal, &grid);
+
+        let mut reference = Partition::from_assignments(&grid, &assignments).unwrap();
+        reference.update(&proposal);
+        let expected = reference.dist_adj(&grid).clone();
+        assert_eq!(incremental.dist_adj.as_ref().unwrap(), &expected);
+        assert_eq!(incremental.assignments, reference.assignments);
+        assert_eq!(incremental.dist_nodes, reference.dist_nodes);
+        assert_eq!(incremental.dist_pops, reference.dist_pops);
+
+        let proposal2 = RecomProposal {
+            a_label: 2,
+            b_label: 3,
+            a_pop: 4,
+            b_pop: 4,
+            a_nodes: vec![8, 9, 10, 11],
+            b_nodes: vec![12, 13, 14, 15],
+        };
+        incremental.update_with_dist_adj(&proposal2, &grid);
+
+        let mut reference2 = Partition::from_assignments(&grid, &assignments).unwrap();
+        reference2.update(&proposal);
+        reference2.update(&proposal2);
+        let expected2 = reference2.dist_adj(&grid).clone();
+        assert_eq!(incremental.dist_adj.as_ref().unwrap(), &expected2);
+    }
+
+    #[test]
+    fn update_with_dist_adj_patches_cross_pair_edges() {
+        let grid = Graph::rect_grid(4, 4);
+        let assignments: Vec<u32> = vec![1, 1, 2, 2, 1, 1, 2, 2, 3, 3, 4, 4, 3, 3, 4, 4];
+        let mut incremental = Partition::from_assignments(&grid, &assignments).unwrap();
+        let _ = incremental.dist_adj(&grid);
+
+        // Move node 5 from district 0 to district 1 by swapping the pair's membership.
+        let proposal = RecomProposal {
+            a_label: 0,
+            b_label: 1,
+            a_pop: 3,
+            b_pop: 5,
+            a_nodes: vec![0, 1, 4],
+            b_nodes: vec![2, 3, 5, 6, 7],
+        };
+        incremental.update_with_dist_adj(&proposal, &grid);
+
+        let mut reference = Partition::from_assignments(&grid, &assignments).unwrap();
+        reference.update(&proposal);
+        let expected = reference.dist_adj(&grid).clone();
+        assert_eq!(incremental.dist_adj.as_ref().unwrap(), &expected);
     }
 }

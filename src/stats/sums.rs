@@ -4,6 +4,23 @@ use crate::partition::Partition;
 use crate::recom::RecomProposal;
 use std::collections::HashMap;
 
+/// Parses `val` as an `i32`, accepting whole-number float strings (e.g. `"1044.0"`).
+/// Panics with a clear message if the value cannot be represented as an integer.
+fn parse_as_int(val: &str, col: &str, n: usize) -> i32 {
+    val.parse::<i32>().unwrap_or_else(|_| {
+        val.parse::<f64>()
+            .ok()
+            .filter(|&f| f.fract() == 0.0)
+            .map(|f| f as i32)
+            .unwrap_or_else(|| {
+                panic!(
+                    "Could not parse value '{}' as integer for column '{}' at node {}",
+                    val, col, n
+                )
+            })
+    })
+}
+
 /// Computes sums over all statistics for all districts in a proposal.
 pub fn partition_sums(graph: &Graph, partition: &Partition) -> HashMap<String, Vec<i32>> {
     graph
@@ -22,10 +39,10 @@ pub fn partition_attr_sums(graph: &Graph, partition: &Partition, attr: &str) -> 
         .dist_nodes
         .iter()
         .map(|nodes| {
-            nodes.iter()
-                .map(|&n| values[n].parse::<i32>())
-                .collect::<Result<Vec<i32>, _>>()
-                .map_or(-1, |nums| nums.iter().sum::<i32>())
+            nodes
+                .iter()
+                .map(|&n| parse_as_int(&values[n], attr, n))
+                .sum()
         })
         .collect()
 }
@@ -36,12 +53,16 @@ pub fn proposal_sums(graph: &Graph, proposal: &RecomProposal) -> HashMap<String,
         .attr
         .iter()
         .map(|(key, values)| {
-            let a_sum = proposal.a_nodes.iter().map(|&n| values[n].parse::<i32>())
-                            .collect::<Result<Vec<i32>, _>>()
-                            .map_or(-1, |nums| nums.iter().sum::<i32>());
-            let b_sum = proposal.b_nodes.iter().map(|&n| values[n].parse::<i32>())
-                            .collect::<Result<Vec<i32>, _>>()
-                            .map_or(-1, |nums| nums.iter().sum::<i32>());
+            let a_sum: i32 = proposal
+                .a_nodes
+                .iter()
+                .map(|&n| parse_as_int(&values[n], key, n))
+                .sum();
+            let b_sum: i32 = proposal
+                .b_nodes
+                .iter()
+                .map(|&n| parse_as_int(&values[n], key, n))
+                .sum();
             return (key.clone(), (a_sum, b_sum));
         })
         .collect();

@@ -1,8 +1,53 @@
 //! Buffer data structures to avoid memory reallocation.
+pub use self::connectivity::{graph_connected_buffered, ConnectivityBuffers};
 pub use self::random_range::RandomRangeBuffer;
 pub use self::spanning_tree::SpanningTreeBuffer;
 pub use self::split::SplitBuffer;
 pub use self::subgraph::SubgraphBuffer;
+
+/// Reusable scratch buffers for repeated graph connectivity checks.
+mod connectivity {
+    use crate::graph::Graph;
+
+    pub struct ConnectivityBuffers {
+        visited: Vec<bool>,
+        stack: Vec<usize>,
+    }
+
+    impl ConnectivityBuffers {
+        pub fn new(capacity: usize) -> Self {
+            Self {
+                visited: Vec::with_capacity(capacity),
+                stack: Vec::with_capacity(capacity),
+            }
+        }
+    }
+
+    /// Returns true iff `graph` has exactly one connected component, reusing
+    /// caller-owned scratch buffers to avoid per-call heap allocations.
+    pub fn graph_connected_buffered(graph: &Graph, bufs: &mut ConnectivityBuffers) -> bool {
+        let n = graph.pops.len();
+        if n <= 1 {
+            return true;
+        }
+        bufs.visited.clear();
+        bufs.visited.resize(n, false);
+        bufs.stack.clear();
+        bufs.visited[0] = true;
+        bufs.stack.push(0);
+        let mut seen = 1;
+        while let Some(node) = bufs.stack.pop() {
+            for &neighbor in graph.neighbors[node].iter() {
+                if !bufs.visited[neighbor] {
+                    bufs.visited[neighbor] = true;
+                    seen += 1;
+                    bufs.stack.push(neighbor);
+                }
+            }
+        }
+        seen == n
+    }
+}
 
 /// Buffers are intended to be lightweight, reusable containers
 /// that improve the efficiency of inner loops. In most buffers,

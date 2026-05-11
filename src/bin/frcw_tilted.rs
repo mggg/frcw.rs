@@ -1,4 +1,4 @@
-//! Short bursts optimization CLI for frcw.
+//! Tilted run optimization CLI for frcw.
 use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -10,8 +10,10 @@ use frcw::objectives::{
     ensure_derived_perim_column, make_objective, partial_node_cols, polsby_popper_autoderive,
     required_edge_cols, required_node_cols,
 };
-use frcw::recom::short_bursts::multi_short_bursts_with_writer;
-use frcw::recom::{IncrementalBackend, RecomParams, RecomVariant};
+use frcw::recom::tilted::{
+    multi_tilted_runs_with_writer, FixedAcceptance, IncrementalBackend, MetropolisAcceptance,
+};
+use frcw::recom::{RecomParams, RecomVariant};
 use frcw::stats::{
     AssignmentsOnlyWriter, BenWriter, CanonicalWriter, JSONLWriter, PcompressWriter, ScoresWriter,
     StatsWriter, TSVWriter,
@@ -77,10 +79,10 @@ fn make_stats_writer(
 }
 
 fn main() {
-    let cli = Command::new("frcw_short_bursts")
+    let cli = Command::new("frcw_tilted")
         .version("0.1.3")
-        .author("Parker J. Rule <parker.rule@tufts.edu>")
-        .about("A short bursts optimizer for redistricting")
+        .author("Peter Rock <peter@mggg.org>")
+        .about("A tilted run optimizer for redistricting")
         .arg(
             Arg::new("graph_json")
                 .long("graph-json")
@@ -93,7 +95,7 @@ fn main() {
                 .long("n-steps")
                 .required(true)
                 .value_parser(value_parser!(u64))
-                .help("The number of proposals to generate."),
+                .help("The total number of chain steps (accepted + rejected)."),
         )
         .arg(
             Arg::new("tol")
@@ -129,14 +131,42 @@ fn main() {
                 .required(false)
                 .value_parser(value_parser!(usize))
                 .default_value("1")
-                .help("The number of threads to use."),
+                .help("Number of worker threads for parallel tree drawing."),
         )
         .arg(
-            Arg::new("burst_length")
-                .long("burst-length")
-                .value_parser(value_parser!(usize))
-                .required(true)
-                .help("The number of accepted steps per short burst."),
+            Arg::new("accept_rule")
+                .long("accept-rule")
+                .required(false)
+                .value_parser(["fixed", "metropolis"])
+                .default_value("fixed")
+                .help(
+                    "Acceptance rule for proposals with a worse score. \
+                    'fixed' accepts with constant probability '--accept-worse-prob'. \
+                    'metropolis' accepts with probability exp(beta * delta) using \
+                    '--metropolis-beta'.",
+                ),
+        )
+        .arg(
+            Arg::new("accept_worse_prob")
+                .long("accept-worse-prob")
+                .required(false)
+                .value_parser(value_parser!(f64))
+                .help(
+                    "Probability of accepting a proposal with a worse score under \
+                    '--accept-rule fixed'. Must be in [0, 1]. Use 0.0 for pure \
+                    hill-climbing, 1.0 for a random walk.",
+                ),
+        )
+        .arg(
+            Arg::new("metropolis_beta")
+                .long("metropolis-beta")
+                .required(false)
+                .value_parser(value_parser!(f64))
+                .help(
+                    "Inverse temperature for '--accept-rule metropolis'. Must be \
+                    non-negative. 0.0 reduces to a random walk; larger values are \
+                    pickier about how much worse a proposal can be.",
+                ),
         )
         .arg(
             Arg::new("sum_cols")
@@ -193,17 +223,18 @@ fn main() {
                 .help(
                     "The variant of the ReCom proposal to use.\n\
                     \tcut-edges-rmst (ReCom-A): sample district pairs by selecting one of the cut \
-                        edges of the previous plan uniformly at random. Sample using minimum \
+                        edges of the previous plan unifromly at random. Sample using minimum \
                         spanning trees.\n\
                     \tdistrict-pairs-rmst (ReCom-B, default): sample pairs of districts uniformly \
                         at random from the space of all possible pairings. Sample using minimum \
                         spanning trees.\n\
                     \tcut-edges-ust (ReCom-C): sample district pairs by selecting one of the cut \
-                        edges of the previous plan uniformly at random. Sample using uniform \
+                        edges of the previous plan unifromly at random. Sample using uniform \
                         spanning trees. \n\
                     \tdistrict-pairs-ust (ReCom-D): sample pairs of districts uniformly at random \
                         from the space of all possible pairings. Sample using uniform spanning \
-                        trees.",
+                        trees.\n\
+                    \treversible (RevReCom): Run a reversible recom chain",
                 ),
         )
         .arg(
@@ -220,10 +251,7 @@ fn main() {
                     \tjsonl-full: JSON Lines with basic summary statistics and recombined nodes\n\
                     \ttsv: Tab-separated proposal statistics\n\
                     \tpcompress: Compressed binary format for post-processing with pcompress\n\
-                    \tben: Compressed binary format for post-processing with BEN\n\
-                    Note: short bursts workers return full partitions, not individual proposals.\n\
-                    Writers that require proposal-level data (tsv, jsonl, pcompress) will have\n\
-                    empty proposal fields. Prefer assignments, canonical, or ben.",
+                    \tben: Compressed binary format for post-processing with BEN",
                 ),
         )
         .arg(
@@ -238,7 +266,7 @@ fn main() {
             Arg::new("scores-output-file")
                 .long("scores-output-file")
                 .help(
-                    "Path to write per-burst objective scores as CSV with step, score, and best_score.",
+                    "Path to write per-step objective scores as CSV with step, score, and best_score.",
                 ),
         )
         .arg(
@@ -252,16 +280,6 @@ fn main() {
                 .long("show-progress")
                 .action(ArgAction::SetTrue)
                 .help("Whether to show a progress bar during execution."),
-        )
-        .arg(
-            Arg::new("write-best-only")
-                .long("write-best-only")
-                .action(ArgAction::SetTrue)
-                .help(
-                    "When set, the output writer records only partitions that improve the \
-                    global best objective score. By default every accepted chain step is \
-                    written. Has no effect when --output-file is not provided.",
-                ),
         );
 
     let matches = cli.get_matches();
@@ -276,29 +294,26 @@ fn main() {
         .get_one::<u64>("rng_seed")
         .expect("rng_seed is required");
     let tol = *matches.get_one::<f64>("tol").expect("tol is required");
-    let burst_length = *matches
-        .get_one::<usize>("burst_length")
-        .expect("burst_length is required");
+    let accept_rule_str = matches
+        .get_one::<String>("accept_rule")
+        .expect("accept_rule has a default value")
+        .as_str();
+    let accept_worse_prob = matches.get_one::<f64>("accept_worse_prob").copied();
+    let metropolis_beta = matches.get_one::<f64>("metropolis_beta").copied();
+
     let maximize = *matches
         .get_one::<bool>("maximize")
         .expect("maximize is required");
-    let variant_str = matches
-        .get_one::<String>("variant")
-        .expect("variant has a default value")
-        .as_str();
     let writer_str = matches
         .get_one::<String>("writer")
         .expect("writer has a default value")
         .as_str();
     let overwrite_output = matches.get_flag("overwrite-output");
     let show_progress = matches.get_flag("show-progress");
-    let write_best_only = matches.get_flag("write-best-only");
-
     let metadata_base_path = matches
         .get_one::<String>("output-file")
         .or_else(|| matches.get_one::<String>("scores-output-file"));
     let metadata_path = metadata_base_path.map(|path| metadata_path(path));
-
     if let (Some(output_path), Some(scores_path)) = (
         matches.get_one::<String>("output-file"),
         matches.get_one::<String>("scores-output-file"),
@@ -337,6 +352,41 @@ fn main() {
     if n_threads == 0 {
         panic!("Parameter error: '--n-threads' must be at least 1.");
     }
+    enum AcceptanceConfig {
+        Fixed(FixedAcceptance),
+        Metropolis(MetropolisAcceptance),
+    }
+    let accept_config = match accept_rule_str {
+        "fixed" => {
+            let prob = accept_worse_prob.expect(
+                "Parameter error: '--accept-worse-prob' is required when '--accept-rule' is 'fixed'.",
+            );
+            if prob < 0.0 || prob > 1.0 {
+                panic!("Parameter error: '--accept-worse-prob' must be between 0 and 1.");
+            }
+            if metropolis_beta.is_some() {
+                panic!(
+                    "Parameter error: '--metropolis-beta' is only valid with '--accept-rule metropolis'."
+                );
+            }
+            AcceptanceConfig::Fixed(FixedAcceptance { prob })
+        }
+        "metropolis" => {
+            let beta = metropolis_beta.expect(
+                "Parameter error: '--metropolis-beta' is required when '--accept-rule' is 'metropolis'.",
+            );
+            if !beta.is_finite() || beta < 0.0 {
+                panic!("Parameter error: '--metropolis-beta' must be a finite non-negative number.");
+            }
+            if accept_worse_prob.is_some() {
+                panic!(
+                    "Parameter error: '--accept-worse-prob' is only valid with '--accept-rule fixed'."
+                );
+            }
+            AcceptanceConfig::Metropolis(MetropolisAcceptance { beta })
+        }
+        other => panic!("Parameter error: unknown acceptance rule '{other}'."),
+    };
 
     let graph_path = matches
         .get_one::<String>("graph_json")
@@ -377,7 +427,7 @@ fn main() {
         .collect();
     let region_weights_raw = (*matches.get_one::<String>("region_weights").unwrap()).as_str();
     let region_weights = parse_region_weights_config(region_weights_raw);
-    // Add the keys in the region weights to sum_cols so the user doesn't have to specify them twice.
+    // Add region weight keys to sum_cols so the user doesn't have to specify them twice.
     if let Some(weight_pairs_vec) = &region_weights {
         for (key, _) in weight_pairs_vec.iter() {
             if !sum_cols.contains(&key) {
@@ -426,7 +476,11 @@ fn main() {
     }
     objective.cache_graph_cols(&mut graph);
     let avg_pop = (graph.total_pop as f64) / (partition.num_dists as f64);
-    let variant = match variant_str {
+    let variant = match matches
+        .get_one::<String>("variant")
+        .expect("variant has a default value")
+        .as_str()
+    {
         "cut-edges-rmst" => match region_weights {
             None => RecomVariant::CutEdgesRMST,
             Some(_) => RecomVariant::CutEdgesRegionAware,
@@ -447,11 +501,15 @@ fn main() {
                 panic!("Region-aware variants are not currently implemented for uniform spanning tree sampling.")
             }
         },
-        "reversible" => {
-            panic!("Reversible ReCom is not supported by the short bursts optimizer.")
-        }
+        "reversible" => match region_weights {
+            None => RecomVariant::Reversible,
+            Some(_) => {
+                panic!("Region-aware variants are not currently implemented for reversible recom.")
+            }
+        },
         bad => panic!("Parameter error: invalid variant '{}'", bad),
     };
+
     let params = RecomParams {
         min_pop: ((1.0 - tol) * avg_pop as f64).ceil() as u32,
         max_pop: ((1.0 + tol) * avg_pop as f64).floor() as u32,
@@ -475,15 +533,31 @@ fn main() {
         "rng_seed": rng_seed,
         "num_threads": n_threads,
         "num_steps": n_steps,
-        "type": "short_bursts",
-        "burst_length": burst_length,
+        "type": "tilted_run",
+        "accept_rule": accept_rule_str,
         "maximize": maximize,
-        "variant": variant_str,
         "overwrite_output": overwrite_output,
         "show_progress": show_progress,
-        "write_best_only": write_best_only,
         "graph_json": graph_json,
     });
+    // Emit only the parameter relevant to the active acceptance rule.
+    match accept_rule_str.as_str() {
+        "fixed" => {
+            if let Some(prob) = accept_worse_prob {
+                meta.as_object_mut()
+                    .unwrap()
+                    .insert("accept_worse_prob".to_string(), json!(prob));
+            }
+        }
+        "metropolis" => {
+            if let Some(beta) = metropolis_beta {
+                meta.as_object_mut()
+                    .unwrap()
+                    .insert("metropolis_beta".to_string(), json!(beta));
+            }
+        }
+        _ => {}
+    }
     if let Some(path) = matches.get_one::<String>("output-file") {
         meta.as_object_mut()
             .unwrap()
@@ -507,7 +581,6 @@ fn main() {
             .unwrap()
             .insert("region_weights".to_string(), json!(region_weights));
     }
-
     let mut metadata_writer: Option<Box<dyn io::Write + Send>> = metadata_path
         .as_ref()
         .map(|path| output_buffer(path.to_str().unwrap(), overwrite_output));
@@ -534,21 +607,36 @@ fn main() {
         .map(|path| ScoresWriter::new(output_buffer(path, overwrite_output)));
 
     let backend = IncrementalBackend { objective };
-    let output = multi_short_bursts_with_writer(
-        &graph,
-        partition,
-        &params,
-        n_threads,
-        backend,
-        maximize,
-        burst_length,
-        stats_writer
-            .as_mut()
-            .map(|writer| &mut **writer as &mut dyn StatsWriter),
-        scores_writer.as_mut(),
-        show_progress,
-        write_best_only,
-    );
+    let output = match accept_config {
+        AcceptanceConfig::Fixed(rule) => multi_tilted_runs_with_writer(
+            &graph,
+            partition,
+            &params,
+            n_threads,
+            backend,
+            rule,
+            maximize,
+            stats_writer
+                .as_mut()
+                .map(|writer| &mut **writer as &mut dyn StatsWriter),
+            scores_writer.as_mut(),
+            show_progress,
+        ),
+        AcceptanceConfig::Metropolis(rule) => multi_tilted_runs_with_writer(
+            &graph,
+            partition,
+            &params,
+            n_threads,
+            backend,
+            rule,
+            maximize,
+            stats_writer
+                .as_mut()
+                .map(|writer| &mut **writer as &mut dyn StatsWriter),
+            scores_writer.as_mut(),
+            show_progress,
+        ),
+    };
 
     match output {
         Ok(_) => {}

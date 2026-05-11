@@ -13,6 +13,24 @@ pub trait SpanningTreeSampler {
         buf: &mut SpanningTreeBuffer,
         rng: &mut SmallRng,
     );
+
+    /// Variant that lets region-aware samplers read node attributes from the
+    /// parent graph without requiring them to be copied onto `graph`. The
+    /// `raw_nodes` slice maps subgraph node indices to parent graph node indices.
+    ///
+    /// The default implementation ignores the parent graph and delegates to
+    /// [`random_spanning_tree`]. Samplers that need attributes (e.g.
+    /// [`RegionAwareSampler`]) override this.
+    fn random_spanning_tree_with_parent(
+        &mut self,
+        graph: &Graph,
+        _parent: &Graph,
+        _raw_nodes: &[usize],
+        buf: &mut SpanningTreeBuffer,
+        rng: &mut SmallRng,
+    ) {
+        self.random_spanning_tree(graph, buf, rng);
+    }
 }
 pub use crate::spanning_tree::rmst::{RMSTSampler, RegionAwareSampler};
 pub use crate::spanning_tree::ust::USTSampler;
@@ -79,7 +97,7 @@ mod ust {
         ///
         /// # Arguments
         /// * `graph` - The graph to form a spanning tree from. The maximum degree
-        ///   of the graph must be ≤256; otherwise, sampling from the uniform
+        ///   of the graph must be <=256; otherwise, sampling from the uniform
         ///   distribution is not guaranteed.
         /// * `buf` - The buffer to insert the spanning tree into.
         /// * `rng` - A random number generator (used to select the spanning tree
@@ -253,23 +271,16 @@ mod rmst {
         }
     }
 
-    impl SpanningTreeSampler for RegionAwareSampler {
-        /// Draws a random spanning tree of a graph by sampling random edge weights
-        /// and finding the minimum spanning tree (using Kruskal's algorithm).
-        /// Reweights edges based on the region-aware settings in the buffer
-        /// configuration: edges that span two units (e.g. two counties)
-        /// are downweighted by the unit's weight, such that (assuming positive weights)
-        /// the minimum spanning tree is more likely to contain edges _between_ units.
-        ///  
-        /// Returns nothing; The MST buffer `buf` is updated in place.
-        ///
-        /// # Arguments
-        /// * `graph` - The graph to form a spanning tree from.
-        /// * `buf` - The buffer to insert the spanning tree into.
-        /// * `rng` - A random number generator (used to generate random edge weights).
-        fn random_spanning_tree(
+    impl RegionAwareSampler {
+        /// Core sampling routine shared by [`SpanningTreeSampler::random_spanning_tree`]
+        /// and [`SpanningTreeSampler::random_spanning_tree_with_parent`]. Reads
+        /// region attribute values from `attr_source` using `attr_indices[edge.X]`
+        /// to look up node attribute positions.
+        fn sample_with_attr_source(
             &mut self,
             graph: &Graph,
+            attr_source: &Graph,
+            attr_indices: &[usize],
             buf: &mut SpanningTreeBuffer,
             rng: &mut SmallRng,
         ) {
@@ -285,13 +296,11 @@ mod rmst {
             self.weights.resize(n_edges, 0.0);
             rng.fill(&mut self.weights[..]);
             for (region_col, region_weight) in self.region_weights.iter() {
+                let col = &attr_source.attr[region_col];
                 for (idx, edge) in graph.edges.iter().enumerate() {
-                    if graph.attr[region_col][edge.0] == "null"
-                        || graph.attr[region_col][edge.0] == ""
-                        || graph.attr[region_col][edge.1] == "null"
-                        || graph.attr[region_col][edge.1] == ""
-                        || graph.attr[region_col][edge.0] != graph.attr[region_col][edge.1]
-                    {
+                    let a = &col[attr_indices[edge.0]];
+                    let b = &col[attr_indices[edge.1]];
+                    if a == "null" || a.is_empty() || b == "null" || b.is_empty() || a != b {
                         self.weights[idx] += region_weight;
                     }
                 }
@@ -312,6 +321,42 @@ mod rmst {
             }
 
             greedy_spanning_tree(graph, buf, &self.edges_by_weight);
+        }
+    }
+
+    impl SpanningTreeSampler for RegionAwareSampler {
+        /// Draws a random spanning tree of a graph by sampling random edge weights
+        /// and finding the minimum spanning tree (using Kruskal's algorithm).
+        /// Reweights edges based on the region-aware settings in the buffer
+        /// configuration: edges that span two units (e.g. two counties)
+        /// are downweighted by the unit's weight, such that (assuming positive weights)
+        /// the minimum spanning tree is more likely to contain edges _between_ units.
+        ///
+        /// Returns nothing; The MST buffer `buf` is updated in place.
+        ///
+        /// # Arguments
+        /// * `graph` - The graph to form a spanning tree from.
+        /// * `buf` - The buffer to insert the spanning tree into.
+        /// * `rng` - A random number generator (used to generate random edge weights).
+        fn random_spanning_tree(
+            &mut self,
+            graph: &Graph,
+            buf: &mut SpanningTreeBuffer,
+            rng: &mut SmallRng,
+        ) {
+            let identity: Vec<usize> = (0..graph.pops.len()).collect();
+            self.sample_with_attr_source(graph, graph, &identity, buf, rng);
+        }
+
+        fn random_spanning_tree_with_parent(
+            &mut self,
+            graph: &Graph,
+            parent: &Graph,
+            raw_nodes: &[usize],
+            buf: &mut SpanningTreeBuffer,
+            rng: &mut SmallRng,
+        ) {
+            self.sample_with_attr_source(graph, parent, raw_nodes, buf, rng);
         }
     }
 }

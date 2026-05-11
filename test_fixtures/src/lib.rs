@@ -15,16 +15,15 @@ const IA_ASSIGNMENT_COL: &str = "CD";
 
 /// Virginia precincts adjacency graph.
 /// See https://github.com/mggg-states/VA-shapefiles
-const VA_FILENAME: &str = "VA_precincts.json";
+const VA_FILENAME: &str = "VA_precincts_fixed_pops.json";
 const VA_POP_COL: &str = "TOTPOP";
 const VA_ASSIGNMENT_COL: &str = "CD_16";
 
-/// Pennsylvania precincts adjacency graph from a draft
-/// shapefile processed by Max Fan (@InnovativeInventor).
-/// Seed plan generated with `recursive_tree_part` in GerryChain.
-const PA_FILENAME: &str = "PA_draft_4.json";
-const PA_POP_COL: &str = "TOTPOP";
-const PA_ASSIGNMENT_COL: &str = "seed_1";
+/// Pennsylvania VTDs adjacency graph (2010 VTDs, 18 congressional districts).
+/// See https://github.com/mggg-states/PA-shapefiles
+const PA_FILENAME: &str = "PA_VTDs.json";
+const PA_POP_COL: &str = "TOT_POP";
+const PA_ASSIGNMENT_COL: &str = "2011_PLA_1";
 
 /// 6x6 grid graph (rook adjacency, equal node populations, stripes assignment).
 const SIX_FILENAME: &str = "6x6.json";
@@ -53,7 +52,15 @@ pub fn fixture_with_attributes(key: &str, columns: Vec<&str>) -> (Graph, Partiti
     // PathBuf -> String: see https://stackoverflow.com/a/42579588
     let path_str = full_path.into_os_string().into_string().unwrap();
     let columns_owned = columns.iter().map(|c| c.to_string()).collect();
-    return from_networkx(&path_str, pop_col, assignment_col, columns_owned).unwrap();
+    return from_networkx(
+        &path_str,
+        pop_col,
+        assignment_col,
+        columns_owned,
+        vec![],
+        vec![],
+    )
+    .unwrap();
 }
 
 // TODO: allow for alternate seeds and population columns.

@@ -3,6 +3,7 @@ mod buffers;
 pub mod config;
 pub mod graph;
 pub mod init;
+pub mod objectives;
 pub mod partition;
 pub mod recom;
 mod spanning_tree;
