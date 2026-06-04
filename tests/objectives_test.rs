@@ -52,6 +52,28 @@ fn test_gingles_partial_scores_fractional_next_district() {
 }
 
 #[test]
+fn test_banded_gingles_partial_rewards_and_penalizes_band() {
+    // One node per district, so bvap/vap sets each district's share directly.
+    let (graph, partition) = path_graph_with_attrs(
+        vec![1, 2, 3, 4, 5, 6],
+        vec![
+            ("BVAP", vec!["43", "51", "58", "63", "70", "73"]),
+            ("VAP", vec!["100", "100", "100", "100", "100", "100"]),
+        ],
+        vec![],
+    );
+
+    let config = r#"{"objective":"banded_gingles_partial","lower_threshold":0.55,"upper_threshold":0.65,"min_pop":"BVAP","total_pop":"VAP"}"#;
+    let obj_fn = make_objective_fn(config);
+
+    // Band [0.55, 0.65]: shares 0.58 and 0.63 are in-band (+2), 0.51 is the
+    // highest below-band district (+0.51/0.55), and 0.70, 0.73 are above-band
+    // (+0.65/0.70 + 0.65/0.73). The 0.43 district contributes nothing.
+    let expected = 2.0 + 0.51 / 0.55 + 0.65 / 0.70 + 0.65 / 0.73;
+    assert_relative_eq!(obj_fn(&graph, &partition), expected, epsilon = 1e-12);
+}
+
+#[test]
 fn test_election_wins_respects_target_party() {
     let (graph, partition) = path_graph_with_attrs(
         vec![1, 1, 2, 2, 3, 3],
@@ -145,6 +167,10 @@ fn test_required_columns_match_objective_configs() {
         r#"{"objective":"gingles_partial","threshold":0.5,"min_pop":"BVAP","total_pop":"VAP"}"#;
     assert_eq!(required_node_cols(gingles), vec!["BVAP", "VAP"]);
     assert!(required_edge_cols(gingles).is_empty());
+
+    let banded = r#"{"objective":"banded_gingles_partial","lower_threshold":0.55,"upper_threshold":0.65,"min_pop":"BVAP","total_pop":"VAP"}"#;
+    assert_eq!(required_node_cols(banded), vec!["BVAP", "VAP"]);
+    assert!(required_edge_cols(banded).is_empty());
 
     let elections = r#"{"objective":"election_wins","elections":[{"votes_a":"DEM_GOV","votes_b":"REP_GOV"},{"votes_a":"DEM_SEN","votes_b":"REP_SEN"}],"target":"a","aggregation":"mean"}"#;
     assert_eq!(

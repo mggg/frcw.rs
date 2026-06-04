@@ -87,6 +87,48 @@ pub enum ObjectiveConfig {
         total_pop_col: &'static str,
     },
 
+    /// Maximize Gingles opportunity districts that fall inside a target band,
+    /// rewarding districts below the band and penalizing districts above it.
+    ///
+    /// Each district whose minority share lands in `[lower, upper]` contributes
+    /// a full `1.0`. As with `gingles_partial`, the single highest district
+    /// strictly below `lower` contributes a fractional reward `share / lower`
+    /// in `[0, 1)`, giving the optimizer gradient signal toward gaining a new
+    /// in-band district. Symmetrically, *every* district strictly above `upper`
+    /// contributes a penalized `upper / share` in `(0, 1)`: the demerit
+    /// `1 - upper / share` grows with how far the district overshoots and
+    /// approaches a maximum of `1` per offending district.
+    ///
+    /// So for a band `[0.55, 0.65]` and shares
+    /// `[0.43, 0.51, 0.58, 0.63, 0.70, 0.73]` the score is
+    /// `2 + 0.51/0.55 + 0.65/0.70 + 0.65/0.73` (two in-band districts, the
+    /// highest below-band district as a tiebreaker, and a penalty term for each
+    /// of the two above-band districts).
+    ///
+    /// JSON schema:
+    /// ```json
+    /// {
+    ///   "objective": "banded_gingles_partial",
+    ///   "lower_threshold": 0.55,
+    ///   "upper_threshold": 0.65,
+    ///   "min_pop": "BVAP",
+    ///   "total_pop": "VAP"
+    /// }
+    /// ```
+    ///
+    /// Fields:
+    /// - `lower_threshold`: lower edge of the target band, must be in (0, 1)
+    /// - `upper_threshold`: upper edge of the target band, must be in (0, 1)
+    ///   and >= `lower_threshold`
+    /// - `min_pop`: node attribute column for the minority population (integer-valued)
+    /// - `total_pop`: node attribute column for the total population (integer-valued)
+    BandedGinglesPartial {
+        lower: f64,
+        upper: f64,
+        min_pop_col: &'static str,
+        total_pop_col: &'static str,
+    },
+
     /// Maximize (or minimize) the number of districts won by a target party
     /// across a set of elections, with a partial-district tiebreaker.
     ///
@@ -185,6 +227,36 @@ impl ObjectiveConfig {
                 sorted_below.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
                 let next_highest = sorted_below.last().copied().unwrap_or(0.0);
                 opportunity_count as f64 + (next_highest / threshold)
+            }
+
+            ObjectiveConfig::BandedGinglesPartial {
+                lower,
+                upper,
+                min_pop_col,
+                total_pop_col,
+            } => {
+                let lower = *lower;
+                let upper = *upper;
+                let min_pops = partition_attr_sums(graph, partition, min_pop_col);
+                let total_pops = partition_attr_sums(graph, partition, total_pop_col);
+                let shares: Vec<f64> = min_pops
+                    .iter()
+                    .zip(total_pops.iter())
+                    .map(|(&m, &t)| m as f64 / t as f64)
+                    .collect();
+                let in_band_count = shares.iter().filter(|&&s| s >= lower && s <= upper).count();
+                let above_penalty: f64 = shares
+                    .iter()
+                    .filter(|&&s| s > upper)
+                    .map(|&s| upper / s)
+                    .sum();
+                let best_below = shares
+                    .iter()
+                    .copied()
+                    .filter(|&s| s < lower)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let best_below = if best_below.is_finite() { best_below } else { 0.0 };
+                in_band_count as f64 + (best_below / lower) + above_penalty
             }
 
             ObjectiveConfig::ElectionWins {
@@ -309,6 +381,14 @@ impl ObjectiveConfig {
                 graph.cache_int_col(min_pop_col);
                 graph.cache_int_col(total_pop_col);
             }
+            ObjectiveConfig::BandedGinglesPartial {
+                min_pop_col,
+                total_pop_col,
+                ..
+            } => {
+                graph.cache_int_col(min_pop_col);
+                graph.cache_int_col(total_pop_col);
+            }
             ObjectiveConfig::PolsbyPopper { .. } => {}
         }
     }
@@ -318,6 +398,7 @@ impl ObjectiveConfig {
 ///
 /// Dispatches on the `"objective"` field:
 /// - `"gingles_partial"` -- see [`ObjectiveConfig::GinglesPartial`]
+/// - `"banded_gingles_partial"` -- see [`ObjectiveConfig::BandedGinglesPartial`]
 /// - `"election_wins"` -- see [`ObjectiveConfig::ElectionWins`]
 /// - `"polsby_popper"` -- see [`ObjectiveConfig::PolsbyPopper`]
 pub fn make_objective(config: &str) -> ObjectiveConfig {
@@ -344,6 +425,32 @@ pub fn make_objective(config: &str) -> ObjectiveConfig {
             );
             ObjectiveConfig::GinglesPartial {
                 threshold,
+                min_pop_col: leak_str(&data, "min_pop"),
+                total_pop_col: leak_str(&data, "total_pop"),
+            }
+        }
+        "banded_gingles_partial" => {
+            let lower = data["lower_threshold"].as_f64().unwrap_or_else(|| {
+                panic!("Missing or non-numeric field 'lower_threshold' in objective config")
+            });
+            let upper = data["upper_threshold"].as_f64().unwrap_or_else(|| {
+                panic!("Missing or non-numeric field 'upper_threshold' in objective config")
+            });
+            assert!(
+                lower > 0.0 && lower < 1.0,
+                "'lower_threshold' must be in (0, 1)"
+            );
+            assert!(
+                upper > 0.0 && upper < 1.0,
+                "'upper_threshold' must be in (0, 1)"
+            );
+            assert!(
+                lower <= upper,
+                "'lower_threshold' must be <= 'upper_threshold'"
+            );
+            ObjectiveConfig::BandedGinglesPartial {
+                lower,
+                upper,
                 min_pop_col: leak_str(&data, "min_pop"),
                 total_pop_col: leak_str(&data, "total_pop"),
             }
@@ -406,7 +513,7 @@ pub fn make_objective(config: &str) -> ObjectiveConfig {
             }
         }
         other => panic!(
-            "Unknown objective '{}'. Supported: 'gingles_partial', 'election_wins', 'polsby_popper'.",
+            "Unknown objective '{}'. Supported: 'gingles_partial', 'banded_gingles_partial', 'election_wins', 'polsby_popper'.",
             other
         ),
     }
@@ -524,7 +631,7 @@ pub fn ensure_derived_perim_column(
 pub fn required_node_cols(config: &str) -> Vec<String> {
     let data: Value = serde_json::from_str(config).unwrap();
     match data["objective"].as_str().unwrap() {
-        "gingles_partial" => vec![
+        "gingles_partial" | "banded_gingles_partial" => vec![
             data["min_pop"].as_str().unwrap().to_string(),
             data["total_pop"].as_str().unwrap().to_string(),
         ],
@@ -625,6 +732,26 @@ pub struct GinglesPartialState {
     score: f64,
 }
 
+/// Per-district cached state for an [`ObjectiveConfig::BandedGinglesPartial`] objective.
+///
+/// `in_band_count` tracks districts whose share is in `[lower, upper]`,
+/// `best_below_*` track the single highest district strictly below `lower`
+/// (the tiebreaker reward, mirroring [`GinglesPartialState`]), and
+/// `above_penalty_sum` is the running sum of `upper / share` over every
+/// district strictly above `upper`. Because the above-band term is a sum
+/// rather than a max, it is maintained by the two-district delta on each
+/// proposal rather than a rescan.
+#[derive(Clone, Debug)]
+pub struct BandedGinglesPartialState {
+    min_pops: Vec<i32>,
+    total_pops: Vec<i32>,
+    in_band_count: usize,
+    best_below_dist: Option<usize>,
+    best_below_share: f64,
+    above_penalty_sum: f64,
+    score: f64,
+}
+
 /// Per-district cached state for an [`ObjectiveConfig::PolsbyPopper`] objective.
 #[derive(Clone, Debug)]
 pub struct PolsbyPopperState {
@@ -639,6 +766,7 @@ pub struct PolsbyPopperState {
 pub enum ObjectiveState {
     ElectionWins(ElectionWinsState),
     GinglesPartial(GinglesPartialState),
+    BandedGinglesPartial(BandedGinglesPartialState),
     PolsbyPopper(PolsbyPopperState),
 }
 
@@ -857,6 +985,49 @@ impl GinglesPartialState {
     }
 }
 
+impl BandedGinglesPartialState {
+    fn init(
+        graph: &Graph,
+        partition: &Partition,
+        lower: f64,
+        upper: f64,
+        min_pop_col: &str,
+        total_pop_col: &str,
+    ) -> BandedGinglesPartialState {
+        let num_dists = partition.num_dists as usize;
+        let min_pops = partition_attr_sums(graph, partition, min_pop_col);
+        let total_pops = partition_attr_sums(graph, partition, total_pop_col);
+        debug_assert_eq!(min_pops.len(), num_dists);
+        debug_assert_eq!(total_pops.len(), num_dists);
+
+        let mut in_band_count: usize = 0;
+        let mut above_penalty_sum: f64 = 0.0;
+        let mut best_below_share: f64 = 0.0;
+        let mut best_below_dist: Option<usize> = None;
+        for d in 0..num_dists {
+            let share = district_share(min_pops[d], total_pops[d]);
+            if share >= lower && share <= upper {
+                in_band_count += 1;
+            } else if share > upper {
+                above_penalty_sum += upper / share;
+            } else if share > best_below_share || best_below_dist.is_none() {
+                best_below_share = share;
+                best_below_dist = Some(d);
+            }
+        }
+        let score = in_band_count as f64 + (best_below_share / lower) + above_penalty_sum;
+        BandedGinglesPartialState {
+            min_pops,
+            total_pops,
+            in_band_count,
+            best_below_dist,
+            best_below_share,
+            above_penalty_sum,
+            score,
+        }
+    }
+}
+
 impl PolsbyPopperState {
     fn init(
         graph: &Graph,
@@ -995,6 +1166,19 @@ impl IncrementalObjective for ObjectiveConfig {
                 min_pop_col,
                 total_pop_col,
             )),
+            ObjectiveConfig::BandedGinglesPartial {
+                lower,
+                upper,
+                min_pop_col,
+                total_pop_col,
+            } => ObjectiveState::BandedGinglesPartial(BandedGinglesPartialState::init(
+                graph,
+                partition,
+                lower,
+                upper,
+                min_pop_col,
+                total_pop_col,
+            )),
             ObjectiveConfig::PolsbyPopper {
                 area_col,
                 perim_col,
@@ -1016,6 +1200,10 @@ impl IncrementalObjective for ObjectiveConfig {
         match (self, state) {
             (ObjectiveConfig::ElectionWins { .. }, ObjectiveState::ElectionWins(s)) => s.score,
             (ObjectiveConfig::GinglesPartial { .. }, ObjectiveState::GinglesPartial(s)) => s.score,
+            (
+                ObjectiveConfig::BandedGinglesPartial { .. },
+                ObjectiveState::BandedGinglesPartial(s),
+            ) => s.score,
             (ObjectiveConfig::PolsbyPopper { .. }, ObjectiveState::PolsbyPopper(s)) => s.score,
             _ => panic!("Objective/state variant mismatch"),
         }
@@ -1049,6 +1237,23 @@ impl IncrementalObjective for ObjectiveConfig {
                 graph,
                 state,
                 *threshold,
+                min_pop_col,
+                total_pop_col,
+                proposal,
+            ),
+            (
+                ObjectiveConfig::BandedGinglesPartial {
+                    lower,
+                    upper,
+                    min_pop_col,
+                    total_pop_col,
+                },
+                ObjectiveState::BandedGinglesPartial(state),
+            ) => score_proposal_banded_gingles(
+                graph,
+                state,
+                *lower,
+                *upper,
                 min_pop_col,
                 total_pop_col,
                 proposal,
@@ -1108,6 +1313,23 @@ impl IncrementalObjective for ObjectiveConfig {
                 proposal,
             ),
             (
+                ObjectiveConfig::BandedGinglesPartial {
+                    lower,
+                    upper,
+                    min_pop_col,
+                    total_pop_col,
+                },
+                ObjectiveState::BandedGinglesPartial(s),
+            ) => apply_proposal_banded_gingles(
+                graph,
+                s,
+                *lower,
+                *upper,
+                min_pop_col,
+                total_pop_col,
+                proposal,
+            ),
+            (
                 ObjectiveConfig::PolsbyPopper {
                     area_col,
                     perim_col,
@@ -1135,6 +1357,15 @@ impl IncrementalObjective for ObjectiveConfig {
                 s.district_scores.clone()
             }
             (ObjectiveConfig::GinglesPartial { .. }, ObjectiveState::GinglesPartial(s)) => s
+                .min_pops
+                .iter()
+                .zip(s.total_pops.iter())
+                .map(|(&m, &t)| if t == 0 { 0.0 } else { m as f64 / t as f64 })
+                .collect(),
+            (
+                ObjectiveConfig::BandedGinglesPartial { .. },
+                ObjectiveState::BandedGinglesPartial(s),
+            ) => s
                 .min_pops
                 .iter()
                 .zip(s.total_pops.iter())
@@ -1515,6 +1746,217 @@ fn gingles_single_update(
     (opp, best_dist, best_share)
 }
 
+// ---------- banded_gingles_partial incremental ----------
+
+/// Penalty-reduced reward contributed by a district above the upper band edge.
+///
+/// Returns `upper / share` (in `(0, 1)`) when `share > upper`, and `0.0`
+/// otherwise. The demerit `1 - upper / share` grows with the overshoot and
+/// approaches a maximum of `1` per offending district.
+#[inline]
+fn above_band_contribution(share: f64, upper: f64) -> f64 {
+    if share > upper {
+        upper / share
+    } else {
+        0.0
+    }
+}
+
+fn score_proposal_banded_gingles(
+    graph: &Graph,
+    state: &BandedGinglesPartialState,
+    lower: f64,
+    upper: f64,
+    min_pop_col: &str,
+    total_pop_col: &str,
+    proposal: &RecomProposal,
+) -> f64 {
+    let a_label = proposal.a_label;
+    let b_label = proposal.b_label;
+    let new_a_min = sum_attr_over(graph, min_pop_col, &proposal.a_nodes);
+    let new_a_total = sum_attr_over(graph, total_pop_col, &proposal.a_nodes);
+    let new_b_min = sum_attr_over(graph, min_pop_col, &proposal.b_nodes);
+    let new_b_total = sum_attr_over(graph, total_pop_col, &proposal.b_nodes);
+
+    let (in_band, _, best_below, above_sum) = banded_gingles_single_update(
+        &state.min_pops,
+        &state.total_pops,
+        state.in_band_count,
+        state.best_below_dist,
+        state.best_below_share,
+        state.above_penalty_sum,
+        lower,
+        upper,
+        a_label,
+        b_label,
+        new_a_min,
+        new_a_total,
+        new_b_min,
+        new_b_total,
+    );
+
+    in_band as f64 + (best_below / lower) + above_sum
+}
+
+fn apply_proposal_banded_gingles(
+    graph: &Graph,
+    state: &mut BandedGinglesPartialState,
+    lower: f64,
+    upper: f64,
+    min_pop_col: &str,
+    total_pop_col: &str,
+    proposal: &RecomProposal,
+) {
+    let a_label = proposal.a_label;
+    let b_label = proposal.b_label;
+    let new_a_min = sum_attr_over(graph, min_pop_col, &proposal.a_nodes);
+    let new_a_total = sum_attr_over(graph, total_pop_col, &proposal.a_nodes);
+    let new_b_min = sum_attr_over(graph, min_pop_col, &proposal.b_nodes);
+    let new_b_total = sum_attr_over(graph, total_pop_col, &proposal.b_nodes);
+
+    let (in_band, best_dist, best_share, above_sum) = banded_gingles_single_update(
+        &state.min_pops,
+        &state.total_pops,
+        state.in_band_count,
+        state.best_below_dist,
+        state.best_below_share,
+        state.above_penalty_sum,
+        lower,
+        upper,
+        a_label,
+        b_label,
+        new_a_min,
+        new_a_total,
+        new_b_min,
+        new_b_total,
+    );
+
+    state.min_pops[a_label] = new_a_min;
+    state.total_pops[a_label] = new_a_total;
+    state.min_pops[b_label] = new_b_min;
+    state.total_pops[b_label] = new_b_total;
+    state.in_band_count = in_band;
+    state.best_below_dist = best_dist;
+    state.best_below_share = best_share;
+    state.above_penalty_sum = above_sum;
+    state.score = in_band as f64 + (best_share / lower) + above_sum;
+}
+
+/// Recomputes the banded-gingles aggregates after a two-district swap, without
+/// mutating the caller's cached state.
+///
+/// Returns `(in_band_count, best_below_dist, best_below_share, above_penalty_sum)`.
+/// The in-band count and above-band penalty sum are updated by the two-district
+/// delta (each category is mutually exclusive). The best-below tiebreaker is a
+/// max over districts strictly below `lower`, so it uses the same fast/slow
+/// rescan pattern as [`gingles_single_update`].
+fn banded_gingles_single_update(
+    min_pops: &[i32],
+    total_pops: &[i32],
+    cached_in_band: usize,
+    cached_below_dist: Option<usize>,
+    cached_below_share: f64,
+    cached_above_sum: f64,
+    lower: f64,
+    upper: f64,
+    a_label: usize,
+    b_label: usize,
+    new_a_min: i32,
+    new_a_total: i32,
+    new_b_min: i32,
+    new_b_total: i32,
+) -> (usize, Option<usize>, f64, f64) {
+    let old_a_share = district_share(min_pops[a_label], total_pops[a_label]);
+    let old_b_share = district_share(min_pops[b_label], total_pops[b_label]);
+    let new_a_share = district_share(new_a_min, new_a_total);
+    let new_b_share = district_share(new_b_min, new_b_total);
+
+    let in_band_of = |s: f64| s >= lower && s <= upper;
+
+    // In-band count: each of the three share categories is mutually exclusive,
+    // so we can subtract the two stale districts and add the two fresh ones.
+    let mut in_band = cached_in_band;
+    for s in [old_a_share, old_b_share] {
+        if in_band_of(s) {
+            in_band -= 1;
+        }
+    }
+    for s in [new_a_share, new_b_share] {
+        if in_band_of(s) {
+            in_band += 1;
+        }
+    }
+
+    // Above-band penalty: a running sum, so the two-district delta is exact.
+    let above_sum = cached_above_sum
+        - above_band_contribution(old_a_share, upper)
+        - above_band_contribution(old_b_share, upper)
+        + above_band_contribution(new_a_share, upper)
+        + above_band_contribution(new_b_share, upper);
+
+    // Best below-band share: a max, so mirror gingles_single_update.
+    let new_a_below = if new_a_share < lower {
+        new_a_share
+    } else {
+        f64::NEG_INFINITY
+    };
+    let new_b_below = if new_b_share < lower {
+        new_b_share
+    } else {
+        f64::NEG_INFINITY
+    };
+
+    let (best_dist, best_share) = match cached_below_dist {
+        Some(holder) if holder != a_label && holder != b_label => {
+            let mut dist = Some(holder);
+            let mut share = cached_below_share;
+            if new_a_below > share {
+                share = new_a_below;
+                dist = Some(a_label);
+            }
+            if new_b_below > share {
+                share = new_b_below;
+                dist = Some(b_label);
+            }
+            if share == f64::NEG_INFINITY {
+                (None, 0.0)
+            } else {
+                (dist, share)
+            }
+        }
+        _ => {
+            // Slow path: rescan unchanged districts.
+            let mut dist: Option<usize> = None;
+            let mut share: f64 = f64::NEG_INFINITY;
+            for (d, (&m, &t)) in min_pops.iter().zip(total_pops.iter()).enumerate() {
+                if d == a_label || d == b_label {
+                    continue;
+                }
+                let s = district_share(m, t);
+                if s < lower && s > share {
+                    share = s;
+                    dist = Some(d);
+                }
+            }
+            if new_a_below > share {
+                share = new_a_below;
+                dist = Some(a_label);
+            }
+            if new_b_below > share {
+                share = new_b_below;
+                dist = Some(b_label);
+            }
+            if share == f64::NEG_INFINITY {
+                (None, 0.0)
+            } else {
+                (dist, share)
+            }
+        }
+    };
+
+    (in_band, best_dist, best_share, above_sum)
+}
+
 // ---------- polsby_popper incremental ----------
 
 fn score_proposal_polsby_popper(
@@ -1763,6 +2205,19 @@ mod incremental_tests {
         }
     }
 
+    fn test_banded_gingles_config() -> ObjectiveConfig {
+        // The 4x4 test fixture's quadrant shares are roughly
+        // [0.082, 0.231, 0.062, 0.257], so this band starts with two
+        // below-band districts, one in-band, and one above-band -- exercising
+        // every branch of the banded scorer.
+        ObjectiveConfig::BandedGinglesPartial {
+            lower: 0.10,
+            upper: 0.24,
+            min_pop_col: static_str("bvap"),
+            total_pop_col: static_str("vap"),
+        }
+    }
+
     fn test_polsby_popper_config() -> ObjectiveConfig {
         ObjectiveConfig::PolsbyPopper {
             area_col: static_str("area"),
@@ -1848,6 +2303,49 @@ mod incremental_tests {
     #[test]
     fn gingles_partial_incremental_matches_full_score() {
         run_equivalence_suite(test_gingles_config());
+    }
+
+    #[test]
+    fn banded_gingles_partial_incremental_matches_full_score() {
+        run_equivalence_suite(test_banded_gingles_config());
+    }
+
+    #[test]
+    fn banded_gingles_partial_matches_worked_example() {
+        // A 6-node path graph with one node per district lets us set each
+        // district's share directly via (bvap, vap).
+        let mut graph = Graph::from_edge_list("0 1\n1 2\n2 3\n3 4\n4 5", "1 1 1 1 1 1").unwrap();
+        // Target shares [0.43, 0.51, 0.58, 0.63, 0.70, 0.73] via bvap/100.
+        let bvap: Vec<String> = ["43", "51", "58", "63", "70", "73"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let vap: Vec<String> = (0..6).map(|_| "100".to_string()).collect();
+        graph.attr.insert("bvap".to_string(), bvap);
+        graph.attr.insert("vap".to_string(), vap);
+
+        let assignments: Vec<u32> = vec![1, 2, 3, 4, 5, 6];
+        let partition = Partition::from_assignments(&graph, &assignments).unwrap();
+
+        let obj = ObjectiveConfig::BandedGinglesPartial {
+            lower: 0.55,
+            upper: 0.65,
+            min_pop_col: static_str("bvap"),
+            total_pop_col: static_str("vap"),
+        };
+
+        // Band [0.55, 0.65]: 0.58 and 0.63 are in-band (+2); 0.51 is the highest
+        // below-band district (+0.51/0.55); 0.70 and 0.73 are above-band
+        // (+0.65/0.70 + 0.65/0.73). 0.43 contributes nothing.
+        let expected = 2.0 + 0.51 / 0.55 + 0.65 / 0.70 + 0.65 / 0.73;
+
+        let full = obj.score(&graph, &partition);
+        assert_close(full, expected, "banded worked example (full)");
+
+        let mut cache_graph = graph.clone();
+        obj.cache_graph_cols(&mut cache_graph);
+        let cached = obj.score_partition(&cache_graph, &partition);
+        assert_close(cached, expected, "banded worked example (incremental)");
     }
 
     #[test]
