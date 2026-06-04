@@ -27,17 +27,17 @@ use crate::partition::Partition;
 use crate::recom::RecomProposal;
 use serde_json::Value;
 
+mod abs_deviation;
 mod banded_gingles_partial;
 mod election_wins;
 mod gingles_partial;
 mod polsby_popper;
 
+pub use abs_deviation::AbsDeviationState;
 pub use banded_gingles_partial::BandedGinglesPartialState;
 pub use election_wins::ElectionWinsState;
 pub use gingles_partial::GinglesPartialState;
-pub use polsby_popper::{
-    ensure_derived_perim_column, polsby_popper_autoderive, PolsbyPopperState,
-};
+pub use polsby_popper::{ensure_derived_perim_column, polsby_popper_autoderive, PolsbyPopperState};
 
 /// Aggregation method for per-district scores.
 #[derive(Clone, Copy, Debug)]
@@ -73,6 +73,34 @@ impl Aggregation {
 /// The JSON schema for each variant is documented below.
 #[derive(Clone, Copy)]
 pub enum ObjectiveConfig {
+    /// Minimize the sum of absolute deviations of a target share from a target
+    ///
+    /// The score is the L1 norm of the vector of district shares closest to the target.
+    /// For example, with `target = 0.5`, `n_target_districts = 2`, and district shares
+    /// `[0.43, 0.51, 0.58, 0.63]`, the score is `|0.43 - 0.5| + |0.51 - 0.5| = 0.08`.
+    ///
+    /// JSON schema:
+    /// ```json
+    /// {
+    ///   "objective": "abs_deviation",
+    ///   "target": 0.5,
+    ///   "n_target_districts": 2,
+    ///   "pov_counts_col": "BVAP",
+    ///   "total_counts_col": "VAP"
+    /// }
+    /// ```
+    ///
+    /// Fields:
+    /// - `target`: target share, must be in (0, 1)
+    /// - `n_target_districts`: number of districts to target, must be in [1, district count]
+    /// - `pov_counts_col`: node attribute column for the population of interest (integer-valued)
+    /// - `total_counts_col`: node attribute column for the total population (integer-valued)
+    AbsDeviation {
+        target: f64,
+        n_target_districts: usize,
+        pov_counts_col: &'static str,
+        total_counts_col: &'static str,
+    },
     /// Maximize Gingles opportunity districts with next-partial-district augmentation.
     ///
     /// The score is the number of districts where the minority share exceeds
@@ -222,11 +250,26 @@ impl ObjectiveConfig {
     /// Evaluates the objective for the given graph and partition.
     pub fn score(&self, graph: &Graph, partition: &Partition) -> f64 {
         match *self {
+            ObjectiveConfig::AbsDeviation {
+                target,
+                n_target_districts,
+                pov_counts_col,
+                total_counts_col,
+            } => abs_deviation::full_score(
+                graph,
+                partition,
+                target,
+                n_target_districts,
+                pov_counts_col,
+                total_counts_col,
+            ),
             ObjectiveConfig::GinglesPartial {
                 threshold,
                 min_pop_col,
                 total_pop_col,
-            } => gingles_partial::full_score(graph, partition, threshold, min_pop_col, total_pop_col),
+            } => {
+                gingles_partial::full_score(graph, partition, threshold, min_pop_col, total_pop_col)
+            }
 
             ObjectiveConfig::BandedGinglesPartial {
                 lower,
@@ -276,6 +319,14 @@ impl ObjectiveConfig {
     /// Panics if any required column is missing or contains a non-integer value.
     pub fn cache_graph_cols(&self, graph: &mut Graph) {
         match self {
+            ObjectiveConfig::AbsDeviation {
+                pov_counts_col,
+                total_counts_col,
+                ..
+            } => {
+                graph.cache_int_col(pov_counts_col);
+                graph.cache_int_col(total_counts_col);
+            }
             ObjectiveConfig::ElectionWins { elections, .. } => {
                 for &(col_a, col_b) in elections.iter() {
                     graph.cache_int_col(col_a);
@@ -315,6 +366,7 @@ fn leak_str(v: &Value, field: &str) -> &'static str {
 /// Parses an objective configuration JSON string into a `Copy` [`ObjectiveConfig`].
 ///
 /// Dispatches on the `"objective"` field:
+/// - `"abs_deviation"` -- see [`ObjectiveConfig::AbsDeviation`]
 /// - `"gingles_partial"` -- see [`ObjectiveConfig::GinglesPartial`]
 /// - `"banded_gingles_partial"` -- see [`ObjectiveConfig::BandedGinglesPartial`]
 /// - `"election_wins"` -- see [`ObjectiveConfig::ElectionWins`]
@@ -324,12 +376,13 @@ pub fn make_objective(config: &str) -> ObjectiveConfig {
     let obj_type = data["objective"].as_str().unwrap();
 
     match obj_type {
+        "abs_deviation" => abs_deviation::from_json(&data),
         "gingles_partial" => gingles_partial::from_json(&data),
         "banded_gingles_partial" => banded_gingles_partial::from_json(&data),
         "election_wins" => election_wins::from_json(&data),
         "polsby_popper" => polsby_popper::from_json(&data),
         other => panic!(
-            "Unknown objective '{}'. Supported: 'gingles_partial', 'banded_gingles_partial', 'election_wins', 'polsby_popper'.",
+            "Unknown objective '{}'. Supported: 'abs_deviation', 'gingles_partial', 'banded_gingles_partial', 'election_wins', 'polsby_popper'.",
             other
         ),
     }
@@ -353,6 +406,7 @@ pub fn make_objective_fn(config: &str) -> impl Fn(&Graph, &Partition) -> f64 + S
 pub fn required_node_cols(config: &str) -> Vec<String> {
     let data: Value = serde_json::from_str(config).unwrap();
     match data["objective"].as_str().unwrap() {
+        "abs_deviation" => abs_deviation::required_node_cols(&data),
         "gingles_partial" => gingles_partial::required_node_cols(&data),
         "banded_gingles_partial" => banded_gingles_partial::required_node_cols(&data),
         "election_wins" => election_wins::required_node_cols(&data),
@@ -399,6 +453,7 @@ pub fn required_edge_cols(config: &str) -> Vec<String> {
 /// Tagged-union cached state for any [`ObjectiveConfig`] variant.
 #[derive(Clone, Debug)]
 pub enum ObjectiveState {
+    AbsDeviation(AbsDeviationState),
     ElectionWins(ElectionWinsState),
     GinglesPartial(GinglesPartialState),
     BandedGinglesPartial(BandedGinglesPartialState),
@@ -427,21 +482,12 @@ pub trait IncrementalObjective: Send + Clone {
 
     /// Returns the score that would result after applying `proposal` to the
     /// partition represented by `current`. Must not mutate `current`.
-    fn score_proposal(
-        &self,
-        graph: &Graph,
-        current: &Self::State,
-        proposal: &RecomProposal,
-    ) -> f64;
+    fn score_proposal(&self, graph: &Graph, current: &Self::State, proposal: &RecomProposal)
+        -> f64;
 
     /// Mutates `state` to reflect applying `proposal`. Must produce state
     /// equivalent to rebuilding from the updated partition via [`Self::init`].
-    fn apply_proposal(
-        &self,
-        graph: &Graph,
-        state: &mut Self::State,
-        proposal: &RecomProposal,
-    );
+    fn apply_proposal(&self, graph: &Graph, state: &mut Self::State, proposal: &RecomProposal);
 
     /// Returns a per-district score vector describing `state`, suitable for
     /// emitting alongside the aggregate score. The length of the returned
@@ -481,6 +527,19 @@ impl IncrementalObjective for ObjectiveConfig {
 
     fn init(&self, graph: &Graph, partition: &Partition) -> ObjectiveState {
         match *self {
+            ObjectiveConfig::AbsDeviation {
+                target,
+                n_target_districts,
+                pov_counts_col,
+                total_counts_col,
+            } => ObjectiveState::AbsDeviation(AbsDeviationState::init(
+                graph,
+                partition,
+                target,
+                n_target_districts,
+                pov_counts_col,
+                total_counts_col,
+            )),
             ObjectiveConfig::ElectionWins {
                 elections,
                 target_a,
@@ -535,6 +594,7 @@ impl IncrementalObjective for ObjectiveConfig {
 
     fn score_state(&self, state: &ObjectiveState) -> f64 {
         match (self, state) {
+            (ObjectiveConfig::AbsDeviation { .. }, ObjectiveState::AbsDeviation(s)) => s.score,
             (ObjectiveConfig::ElectionWins { .. }, ObjectiveState::ElectionWins(s)) => s.score,
             (ObjectiveConfig::GinglesPartial { .. }, ObjectiveState::GinglesPartial(s)) => s.score,
             (
@@ -554,6 +614,23 @@ impl IncrementalObjective for ObjectiveConfig {
     ) -> f64 {
         match (self, current) {
             (
+                ObjectiveConfig::AbsDeviation {
+                    target,
+                    n_target_districts,
+                    pov_counts_col,
+                    total_counts_col,
+                },
+                ObjectiveState::AbsDeviation(state),
+            ) => abs_deviation::score_proposal(
+                graph,
+                state,
+                *target,
+                *n_target_districts,
+                pov_counts_col,
+                total_counts_col,
+                proposal,
+            ),
+            (
                 ObjectiveConfig::ElectionWins {
                     elections,
                     target_a,
@@ -561,7 +638,12 @@ impl IncrementalObjective for ObjectiveConfig {
                 },
                 ObjectiveState::ElectionWins(state),
             ) => election_wins::score_proposal(
-                graph, state, elections, *target_a, *aggregation, proposal,
+                graph,
+                state,
+                elections,
+                *target_a,
+                *aggregation,
+                proposal,
             ),
             (
                 ObjectiveConfig::GinglesPartial {
@@ -617,13 +699,25 @@ impl IncrementalObjective for ObjectiveConfig {
         }
     }
 
-    fn apply_proposal(
-        &self,
-        graph: &Graph,
-        state: &mut ObjectiveState,
-        proposal: &RecomProposal,
-    ) {
+    fn apply_proposal(&self, graph: &Graph, state: &mut ObjectiveState, proposal: &RecomProposal) {
         match (self, state) {
+            (
+                ObjectiveConfig::AbsDeviation {
+                    target,
+                    n_target_districts,
+                    pov_counts_col,
+                    total_counts_col,
+                },
+                ObjectiveState::AbsDeviation(s),
+            ) => abs_deviation::apply_proposal(
+                graph,
+                s,
+                *target,
+                *n_target_districts,
+                pov_counts_col,
+                total_counts_col,
+                proposal,
+            ),
             (
                 ObjectiveConfig::ElectionWins {
                     elections,
@@ -632,7 +726,12 @@ impl IncrementalObjective for ObjectiveConfig {
                 },
                 ObjectiveState::ElectionWins(s),
             ) => election_wins::apply_proposal(
-                graph, s, elections, *target_a, *aggregation, proposal,
+                graph,
+                s,
+                elections,
+                *target_a,
+                *aggregation,
+                proposal,
             ),
             (
                 ObjectiveConfig::GinglesPartial {
@@ -690,6 +789,11 @@ impl IncrementalObjective for ObjectiveConfig {
 
     fn district_scores(&self, state: &ObjectiveState) -> Vec<f64> {
         match (self, state) {
+            (ObjectiveConfig::AbsDeviation { target, .. }, ObjectiveState::AbsDeviation(s)) => s
+                .shares
+                .iter()
+                .map(|&sh| if sh.is_finite() { (sh - *target).abs() } else { f64::INFINITY })
+                .collect(),
             (ObjectiveConfig::PolsbyPopper { .. }, ObjectiveState::PolsbyPopper(s)) => {
                 s.district_scores.clone()
             }
@@ -736,8 +840,12 @@ mod incremental_tests {
         let bvap: Vec<String> = (0..n).map(|i| ((i * 5) % 20 + 1).to_string()).collect();
         let vap: Vec<String> = (0..n).map(|i| ((i * 13) % 40 + 30).to_string()).collect();
         // Float-parseable attributes for polsby_popper.
-        let area: Vec<String> = (0..n).map(|i| format!("{}", (i + 1) as f64 * 1.5)).collect();
-        let perim: Vec<String> = (0..n).map(|i| format!("{}", (i + 3) as f64 * 2.25)).collect();
+        let area: Vec<String> = (0..n)
+            .map(|i| format!("{}", (i + 1) as f64 * 1.5))
+            .collect();
+        let perim: Vec<String> = (0..n)
+            .map(|i| format!("{}", (i + 3) as f64 * 2.25))
+            .collect();
 
         graph.attr.insert("dem".to_string(), dem);
         graph.attr.insert("rep".to_string(), rep);
@@ -753,7 +861,9 @@ mod incremental_tests {
             .enumerate()
             .map(|(i, _)| 0.5 + (i as f64) * 0.1)
             .collect();
-        graph.edge_attr.insert("shared_perim".to_string(), shared_perim);
+        graph
+            .edge_attr
+            .insert("shared_perim".to_string(), shared_perim);
 
         // 4x4 grid, 2x2 quadrant partition. Column-major indexing.
         // col 0: nodes 0..=3, col 1: 4..=7, col 2: 8..=11, col 3: 12..=15.
@@ -820,6 +930,18 @@ mod incremental_tests {
             threshold: 0.5,
             min_pop_col: static_str("bvap"),
             total_pop_col: static_str("vap"),
+        }
+    }
+
+    fn test_abs_deviation_config() -> ObjectiveConfig {
+        // The 4x4 test fixture's quadrant shares are roughly
+        // [0.082, 0.231, 0.062, 0.257]; target 0.2 with 2 target districts
+        // selects a non-trivial nearest pair and exercises the selection.
+        ObjectiveConfig::AbsDeviation {
+            target: 0.2,
+            n_target_districts: 2,
+            pov_counts_col: static_str("bvap"),
+            total_counts_col: static_str("vap"),
         }
     }
 
@@ -911,6 +1033,11 @@ mod incremental_tests {
         }
         let chain_full = obj.score(&graph, &chain_part);
         assert_close(obj.score_state(&chain_state), chain_full, "chain_score");
+    }
+
+    #[test]
+    fn abs_deviation_incremental_matches_full_score() {
+        run_equivalence_suite(test_abs_deviation_config());
     }
 
     #[test]
@@ -1012,12 +1139,7 @@ mod incremental_tests {
         let shared: Vec<f64> = vec![2.0, 3.0, 4.0, 5.0];
         graph.edge_attr.insert("shared_perim".to_string(), shared);
 
-        ensure_derived_perim_column(
-            &mut graph,
-            "perim",
-            "boundary_perim",
-            "shared_perim",
-        );
+        ensure_derived_perim_column(&mut graph, "perim", "boundary_perim", "shared_perim");
 
         let perim: Vec<f64> = graph
             .attr
