@@ -15,6 +15,7 @@
 //! parsing/column-requirement entry points, and the dispatch that routes each
 //! to the per-score implementation. Each score lives in its own submodule:
 //!
+//! - [`by_district_abs_deviation`]
 //! - [`gingles_partial`]
 //! - [`banded_gingles_partial`]
 //! - [`election_wins`]
@@ -27,14 +28,14 @@ use crate::partition::Partition;
 use crate::recom::RecomProposal;
 use serde_json::Value;
 
-mod abs_deviation;
 mod banded_gingles_partial;
+mod by_district_abs_deviation;
 mod election_wins;
 mod gingles_partial;
 mod polsby_popper;
 
-pub use abs_deviation::AbsDeviationState;
 pub use banded_gingles_partial::BandedGinglesPartialState;
+pub use by_district_abs_deviation::ByDistrictAbsDeviationState;
 pub use election_wins::ElectionWinsState;
 pub use gingles_partial::GinglesPartialState;
 pub use polsby_popper::{ensure_derived_perim_column, polsby_popper_autoderive, PolsbyPopperState};
@@ -73,34 +74,64 @@ impl Aggregation {
 /// The JSON schema for each variant is documented below.
 #[derive(Clone, Copy)]
 pub enum ObjectiveConfig {
-    /// Minimize the sum of absolute deviations of a target share from a target
+    /// Minimize the total absolute distance between a list of target shares and
+    /// distinct districts.
     ///
-    /// The score is the L1 norm of the vector of district shares closest to the target.
-    /// For example, with `target = 0.5`, `n_target_districts = 2`, and district shares
-    /// `[0.43, 0.51, 0.58, 0.63]`, the score is `|0.43 - 0.5| + |0.51 - 0.5| = 0.08`.
+    /// For each district, `share = pov_counts / total_counts`. Given
+    /// `target_values` of length `k` (with `1 <= k <= district count`), the
+    /// score is the minimum total `|share - target|` over all matchings of the
+    /// `k` targets to `k` *distinct* districts -- each target claims its own
+    /// district. On the real line this is achieved by sorting both lists and
+    /// matching order-preservingly. For example, with
+    /// `target_values = [0.1, 0.4, 0.6]` and district shares `[0.3, 0.5, 0.6]`,
+    /// the score is `|0.3 - 0.1| + |0.5 - 0.4| + |0.6 - 0.6| = 0.3`.
+    ///
+    /// Two shapes have a simpler reading:
+    /// - `k` copies of a single value `t` reward the `k` districts closest to
+    ///   `t` (the sum of the `k` smallest `|share - t|`);
+    /// - one value per district (`k == district count`) is the full sorted
+    ///   bijection.
     ///
     /// JSON schema:
     /// ```json
     /// {
+    ///   "objective": "by_district_abs_deviation",
+    ///   "target_values": [0.1, 0.4, 0.6],
+    ///   "pov_counts_col": "BVAP",
+    ///   "total_counts_col": "VAP"
+    /// }
+    /// ```
+    ///
+    /// As a shorthand for many districts sharing one target, supply `target`
+    /// and `n_target_districts` instead of `target_values` (this expands to
+    /// `n_target_districts` copies of `target`, and is also accepted under the
+    /// alias objective name `"abs_deviation"`):
+    /// ```json
+    /// {
     ///   "objective": "abs_deviation",
     ///   "target": 0.5,
-    ///   "n_target_districts": 2,
+    ///   "n_target_districts": 30,
     ///   "pov_counts_col": "BVAP",
     ///   "total_counts_col": "VAP"
     /// }
     /// ```
     ///
     /// Fields:
-    /// - `target`: target share, must be in (0, 1)
-    /// - `n_target_districts`: number of districts to target, must be in [1, district count]
+    /// - `target_values`: target shares, each a finite value in [0, 1]; length
+    ///   must be between 1 and the district count (validated when the chain
+    ///   starts)
+    /// - `target` + `n_target_districts`: shorthand alternative to
+    ///   `target_values`; `target` is a finite share in [0, 1] and
+    ///   `n_target_districts` a positive count (<= district count)
     /// - `pov_counts_col`: node attribute column for the population of interest (integer-valued)
     /// - `total_counts_col`: node attribute column for the total population (integer-valued)
-    AbsDeviation {
-        target: f64,
-        n_target_districts: usize,
+    ByDistrictAbsDeviation {
+        /// Stored sorted ascending (see [`make_objective`]).
+        target_values: &'static [f64],
         pov_counts_col: &'static str,
         total_counts_col: &'static str,
     },
+
     /// Maximize Gingles opportunity districts with next-partial-district augmentation.
     ///
     /// The score is the number of districts where the minority share exceeds
@@ -250,16 +281,14 @@ impl ObjectiveConfig {
     /// Evaluates the objective for the given graph and partition.
     pub fn score(&self, graph: &Graph, partition: &Partition) -> f64 {
         match *self {
-            ObjectiveConfig::AbsDeviation {
-                target,
-                n_target_districts,
+            ObjectiveConfig::ByDistrictAbsDeviation {
+                target_values,
                 pov_counts_col,
                 total_counts_col,
-            } => abs_deviation::full_score(
+            } => by_district_abs_deviation::full_score(
                 graph,
                 partition,
-                target,
-                n_target_districts,
+                target_values,
                 pov_counts_col,
                 total_counts_col,
             ),
@@ -319,7 +348,7 @@ impl ObjectiveConfig {
     /// Panics if any required column is missing or contains a non-integer value.
     pub fn cache_graph_cols(&self, graph: &mut Graph) {
         match self {
-            ObjectiveConfig::AbsDeviation {
+            ObjectiveConfig::ByDistrictAbsDeviation {
                 pov_counts_col,
                 total_counts_col,
                 ..
@@ -366,7 +395,8 @@ fn leak_str(v: &Value, field: &str) -> &'static str {
 /// Parses an objective configuration JSON string into a `Copy` [`ObjectiveConfig`].
 ///
 /// Dispatches on the `"objective"` field:
-/// - `"abs_deviation"` -- see [`ObjectiveConfig::AbsDeviation`]
+/// - `"by_district_abs_deviation"` (alias: `"abs_deviation"`) -- see
+///   [`ObjectiveConfig::ByDistrictAbsDeviation`]
 /// - `"gingles_partial"` -- see [`ObjectiveConfig::GinglesPartial`]
 /// - `"banded_gingles_partial"` -- see [`ObjectiveConfig::BandedGinglesPartial`]
 /// - `"election_wins"` -- see [`ObjectiveConfig::ElectionWins`]
@@ -376,13 +406,15 @@ pub fn make_objective(config: &str) -> ObjectiveConfig {
     let obj_type = data["objective"].as_str().unwrap();
 
     match obj_type {
-        "abs_deviation" => abs_deviation::from_json(&data),
+        // The `abs_deviation` name accepts the `target` + `n_target_districts`
+        // shorthand and parses into a ByDistrictAbsDeviation.
+        "by_district_abs_deviation" | "abs_deviation" => by_district_abs_deviation::from_json(&data),
         "gingles_partial" => gingles_partial::from_json(&data),
         "banded_gingles_partial" => banded_gingles_partial::from_json(&data),
         "election_wins" => election_wins::from_json(&data),
         "polsby_popper" => polsby_popper::from_json(&data),
         other => panic!(
-            "Unknown objective '{}'. Supported: 'abs_deviation', 'gingles_partial', 'banded_gingles_partial', 'election_wins', 'polsby_popper'.",
+            "Unknown objective '{}'. Supported: 'by_district_abs_deviation' (alias 'abs_deviation'), 'gingles_partial', 'banded_gingles_partial', 'election_wins', 'polsby_popper'.",
             other
         ),
     }
@@ -406,7 +438,9 @@ pub fn make_objective_fn(config: &str) -> impl Fn(&Graph, &Partition) -> f64 + S
 pub fn required_node_cols(config: &str) -> Vec<String> {
     let data: Value = serde_json::from_str(config).unwrap();
     match data["objective"].as_str().unwrap() {
-        "abs_deviation" => abs_deviation::required_node_cols(&data),
+        "by_district_abs_deviation" | "abs_deviation" => {
+            by_district_abs_deviation::required_node_cols(&data)
+        }
         "gingles_partial" => gingles_partial::required_node_cols(&data),
         "banded_gingles_partial" => banded_gingles_partial::required_node_cols(&data),
         "election_wins" => election_wins::required_node_cols(&data),
@@ -453,7 +487,7 @@ pub fn required_edge_cols(config: &str) -> Vec<String> {
 /// Tagged-union cached state for any [`ObjectiveConfig`] variant.
 #[derive(Clone, Debug)]
 pub enum ObjectiveState {
-    AbsDeviation(AbsDeviationState),
+    ByDistrictAbsDeviation(ByDistrictAbsDeviationState),
     ElectionWins(ElectionWinsState),
     GinglesPartial(GinglesPartialState),
     BandedGinglesPartial(BandedGinglesPartialState),
@@ -527,16 +561,14 @@ impl IncrementalObjective for ObjectiveConfig {
 
     fn init(&self, graph: &Graph, partition: &Partition) -> ObjectiveState {
         match *self {
-            ObjectiveConfig::AbsDeviation {
-                target,
-                n_target_districts,
+            ObjectiveConfig::ByDistrictAbsDeviation {
+                target_values,
                 pov_counts_col,
                 total_counts_col,
-            } => ObjectiveState::AbsDeviation(AbsDeviationState::init(
+            } => ObjectiveState::ByDistrictAbsDeviation(ByDistrictAbsDeviationState::init(
                 graph,
                 partition,
-                target,
-                n_target_districts,
+                target_values,
                 pov_counts_col,
                 total_counts_col,
             )),
@@ -594,7 +626,10 @@ impl IncrementalObjective for ObjectiveConfig {
 
     fn score_state(&self, state: &ObjectiveState) -> f64 {
         match (self, state) {
-            (ObjectiveConfig::AbsDeviation { .. }, ObjectiveState::AbsDeviation(s)) => s.score,
+            (
+                ObjectiveConfig::ByDistrictAbsDeviation { .. },
+                ObjectiveState::ByDistrictAbsDeviation(s),
+            ) => s.score,
             (ObjectiveConfig::ElectionWins { .. }, ObjectiveState::ElectionWins(s)) => s.score,
             (ObjectiveConfig::GinglesPartial { .. }, ObjectiveState::GinglesPartial(s)) => s.score,
             (
@@ -614,18 +649,16 @@ impl IncrementalObjective for ObjectiveConfig {
     ) -> f64 {
         match (self, current) {
             (
-                ObjectiveConfig::AbsDeviation {
-                    target,
-                    n_target_districts,
+                ObjectiveConfig::ByDistrictAbsDeviation {
+                    target_values,
                     pov_counts_col,
                     total_counts_col,
                 },
-                ObjectiveState::AbsDeviation(state),
-            ) => abs_deviation::score_proposal(
+                ObjectiveState::ByDistrictAbsDeviation(state),
+            ) => by_district_abs_deviation::score_proposal(
                 graph,
                 state,
-                *target,
-                *n_target_districts,
+                target_values,
                 pov_counts_col,
                 total_counts_col,
                 proposal,
@@ -702,18 +735,16 @@ impl IncrementalObjective for ObjectiveConfig {
     fn apply_proposal(&self, graph: &Graph, state: &mut ObjectiveState, proposal: &RecomProposal) {
         match (self, state) {
             (
-                ObjectiveConfig::AbsDeviation {
-                    target,
-                    n_target_districts,
+                ObjectiveConfig::ByDistrictAbsDeviation {
+                    target_values,
                     pov_counts_col,
                     total_counts_col,
                 },
-                ObjectiveState::AbsDeviation(s),
-            ) => abs_deviation::apply_proposal(
+                ObjectiveState::ByDistrictAbsDeviation(s),
+            ) => by_district_abs_deviation::apply_proposal(
                 graph,
                 s,
-                *target,
-                *n_target_districts,
+                target_values,
                 pov_counts_col,
                 total_counts_col,
                 proposal,
@@ -789,10 +820,15 @@ impl IncrementalObjective for ObjectiveConfig {
 
     fn district_scores(&self, state: &ObjectiveState) -> Vec<f64> {
         match (self, state) {
-            (ObjectiveConfig::AbsDeviation { target, .. }, ObjectiveState::AbsDeviation(s)) => s
+            // The distinct-assignment matching makes a per-district deviation
+            // ill-defined, so emit the honest per-district shares.
+            (
+                ObjectiveConfig::ByDistrictAbsDeviation { .. },
+                ObjectiveState::ByDistrictAbsDeviation(s),
+            ) => s
                 .shares
                 .iter()
-                .map(|&sh| if sh.is_finite() { (sh - *target).abs() } else { f64::INFINITY })
+                .map(|&sh| if sh.is_finite() { sh } else { 0.0 })
                 .collect(),
             (ObjectiveConfig::PolsbyPopper { .. }, ObjectiveState::PolsbyPopper(s)) => {
                 s.district_scores.clone()
@@ -933,13 +969,32 @@ mod incremental_tests {
         }
     }
 
-    fn test_abs_deviation_config() -> ObjectiveConfig {
-        // The 4x4 test fixture's quadrant shares are roughly
-        // [0.082, 0.231, 0.062, 0.257]; target 0.2 with 2 target districts
-        // selects a non-trivial nearest pair and exercises the selection.
-        ObjectiveConfig::AbsDeviation {
-            target: 0.2,
-            n_target_districts: 2,
+    // Builders for the three scoring paths of `by_district_abs_deviation`. The
+    // fixture has 4 districts; `target_values` must be sorted ascending (the
+    // parser guarantees this, but the builders bypass it).
+
+    /// `k < num_dists`, non-uniform -> general DP path.
+    fn test_by_district_general_config() -> ObjectiveConfig {
+        ObjectiveConfig::ByDistrictAbsDeviation {
+            target_values: &[0.1, 0.25, 0.5],
+            pov_counts_col: static_str("bvap"),
+            total_counts_col: static_str("vap"),
+        }
+    }
+
+    /// `k == num_dists` -> full sorted-bijection bypass.
+    fn test_by_district_full_bijection_config() -> ObjectiveConfig {
+        ObjectiveConfig::ByDistrictAbsDeviation {
+            target_values: &[0.05, 0.10, 0.20, 0.30],
+            pov_counts_col: static_str("bvap"),
+            total_counts_col: static_str("vap"),
+        }
+    }
+
+    /// All targets equal -> "k nearest districts" bypass.
+    fn test_by_district_uniform_config() -> ObjectiveConfig {
+        ObjectiveConfig::ByDistrictAbsDeviation {
+            target_values: &[0.2, 0.2],
             pov_counts_col: static_str("bvap"),
             total_counts_col: static_str("vap"),
         }
@@ -1036,8 +1091,106 @@ mod incremental_tests {
     }
 
     #[test]
-    fn abs_deviation_incremental_matches_full_score() {
-        run_equivalence_suite(test_abs_deviation_config());
+    fn by_district_abs_deviation_general_incremental_matches_full_score() {
+        run_equivalence_suite(test_by_district_general_config());
+    }
+
+    #[test]
+    fn by_district_abs_deviation_full_bijection_incremental_matches_full_score() {
+        run_equivalence_suite(test_by_district_full_bijection_config());
+    }
+
+    #[test]
+    fn by_district_abs_deviation_uniform_incremental_matches_full_score() {
+        run_equivalence_suite(test_by_district_uniform_config());
+    }
+
+    /// Full score for a path graph with one node per district, share = bvap/100.
+    /// `targets` need not be sorted; the helper sorts them as the parser would.
+    fn by_district_full_score(bvap: &[u32], targets: &[f64]) -> f64 {
+        let n = bvap.len();
+        let edges: String = (0..n.saturating_sub(1))
+            .map(|i| format!("{} {}", i, i + 1))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let pops = vec!["1"; n].join(" ");
+        let mut graph = Graph::from_edge_list(&edges, &pops).unwrap();
+        graph.attr.insert(
+            "bvap".to_string(),
+            bvap.iter().map(|v| v.to_string()).collect(),
+        );
+        graph.attr.insert(
+            "vap".to_string(),
+            (0..n).map(|_| "100".to_string()).collect(),
+        );
+        let assignments: Vec<u32> = (1..=n as u32).collect();
+        let partition = Partition::from_assignments(&graph, &assignments).unwrap();
+
+        let mut sorted = targets.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let target_values: &'static [f64] = Box::leak(sorted.into_boxed_slice());
+        let obj = ObjectiveConfig::ByDistrictAbsDeviation {
+            target_values,
+            pov_counts_col: static_str("bvap"),
+            total_counts_col: static_str("vap"),
+        };
+        obj.score(&graph, &partition)
+    }
+
+    #[test]
+    fn by_district_abs_deviation_worked_examples() {
+        // User's example: shares [0.3, 0.5, 0.6], targets [0.1, 0.4, 0.6]
+        // (k == num_dists) -> sorted-matched 0.2 + 0.1 + 0.0 = 0.3.
+        assert_close(
+            by_district_full_score(&[30, 50, 60], &[0.1, 0.4, 0.6]),
+            0.3,
+            "full bijection",
+        );
+
+        // Subset (k < num_dists), general DP: shares [0.1, 0.5, 0.9],
+        // targets [0.45, 0.85] -> best distinct match 0.45->0.5, 0.85->0.9
+        // = 0.05 + 0.05 = 0.10 (beating any matching that uses district 0.1).
+        assert_close(
+            by_district_full_score(&[10, 50, 90], &[0.45, 0.85]),
+            0.10,
+            "subset assignment",
+        );
+
+        // All-equal targets: shares [0.1, 0.5, 0.9], targets [0.45, 0.45]
+        // -> two smallest |share - 0.45| = 0.05 + 0.35.
+        assert_close(
+            by_district_full_score(&[10, 50, 90], &[0.45, 0.45]),
+            0.05 + 0.35,
+            "uniform (k nearest)",
+        );
+    }
+
+    #[test]
+    fn by_district_abs_deviation_shorthand_matches_explicit() {
+        // The `target` + `n_target_districts` shorthand (and the `abs_deviation`
+        // alias) expand to repeated target_values.
+        let shorthand = make_objective(
+            r#"{"objective":"abs_deviation","target":0.3,"n_target_districts":3,
+                "pov_counts_col":"bvap","total_counts_col":"vap"}"#,
+        );
+        match shorthand {
+            ObjectiveConfig::ByDistrictAbsDeviation { target_values, .. } => {
+                assert_eq!(target_values.to_vec(), vec![0.3, 0.3, 0.3]);
+            }
+            _ => panic!("expected ByDistrictAbsDeviation"),
+        }
+
+        // Scores identically to the explicit list form.
+        let (graph, partition) = make_test_graph_and_partition();
+        let explicit = make_objective(
+            r#"{"objective":"by_district_abs_deviation","target_values":[0.3,0.3,0.3],
+                "pov_counts_col":"bvap","total_counts_col":"vap"}"#,
+        );
+        assert_close(
+            shorthand.score(&graph, &partition),
+            explicit.score(&graph, &partition),
+            "shorthand vs explicit",
+        );
     }
 
     #[test]
