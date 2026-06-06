@@ -109,6 +109,10 @@ pub struct RecomParams {
     /// Weight parameters for region-aware ReCom, ordered by importance
     /// (highest to lowest).
     pub region_weights: Option<Vec<(String, f64)>>,
+    /// Per-edge attribute columns whose values are added to edge weights in
+    /// RMST / region-aware spanning-tree sampling. An edge missing a key
+    /// contributes 0. Empty = none.
+    pub edge_weight_keys: Vec<String>,
 }
 
 impl RecomProposal {
@@ -215,20 +219,36 @@ pub(crate) fn make_sampler(
     buf_size: usize,
     rng: &mut SmallRng,
 ) -> Box<dyn SpanningTreeSampler> {
+    let edge_weight_keys = params.edge_weight_keys.clone();
     match params.variant {
         RecomVariant::DistrictPairsRMST | RecomVariant::CutEdgesRMST => {
-            Box::new(RMSTSampler::new(buf_size))
+            if edge_weight_keys.is_empty() {
+                Box::new(RMSTSampler::new(buf_size))
+            } else {
+                Box::new(RegionAwareSampler::new(buf_size, vec![], edge_weight_keys))
+            }
         }
         RecomVariant::DistrictPairsRegionAware | RecomVariant::CutEdgesRegionAware => {
             let region_weights = params
                 .region_weights
                 .clone()
                 .expect("Region weights required for region-aware ReCom.");
-            Box::new(RegionAwareSampler::new(buf_size, region_weights))
+            Box::new(RegionAwareSampler::new(
+                buf_size,
+                region_weights,
+                edge_weight_keys,
+            ))
         }
         RecomVariant::DistrictPairsUST
         | RecomVariant::CutEdgesUST
-        | RecomVariant::Reversible => Box::new(USTSampler::new(buf_size, rng)),
+        | RecomVariant::Reversible => {
+            if !edge_weight_keys.is_empty() {
+                panic!(
+                    "--edge-weight-keys is only supported for RMST and region-aware variants."
+                );
+            }
+            Box::new(USTSampler::new(buf_size, rng))
+        }
     }
 }
 

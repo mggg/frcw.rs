@@ -25,6 +25,7 @@ fn make_params(num_steps: u64) -> RecomParams {
         balance_ub: 0,
         variant: RecomVariant::DistrictPairsRMST,
         region_weights: None,
+        edge_weight_keys: vec![],
     }
 }
 
@@ -149,6 +150,7 @@ fn test_short_bursts_writer_records_every_accepted_step() {
         balance_ub: 0,
         variant: RecomVariant::DistrictPairsRMST,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
 
     let mut writer = RecordingWriter::new();
@@ -266,6 +268,7 @@ fn test_short_bursts_write_best_only_cross_validation() {
         balance_ub: 0,
         variant: RecomVariant::DistrictPairsRMST,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
 
     // --- Run 1: record every step ---

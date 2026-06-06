@@ -159,6 +159,18 @@ fn main() {
                 ),
         )
         .arg(
+            Arg::new("edge_weight_keys")
+                .long("edge-weight-keys")
+                .value_parser(value_parser!(String))
+                .num_args(1..)
+                .help(
+                    "Per-edge attribute columns whose values are added to edge weights \
+                    in RMST / region-aware spanning-tree sampling. An edge missing a key \
+                    contributes 0; a key present on no edge is an error. \
+                    Only valid with the rmst and region-aware variants.",
+                ),
+        )
+        .arg(
             Arg::new("objective")
                 .long("objective")
                 .required(true)
@@ -375,6 +387,11 @@ fn main() {
         .unwrap_or_default()
         .map(|c| c.to_string())
         .collect();
+    let edge_weight_keys: Vec<String> = matches
+        .get_many::<String>("edge_weight_keys")
+        .unwrap_or_default()
+        .map(|c| c.to_string())
+        .collect();
     let region_weights_raw = (*matches.get_one::<String>("region_weights").unwrap()).as_str();
     let region_weights = parse_region_weights_config(region_weights_raw);
     // Add the keys in the region weights to sum_cols so the user doesn't have to specify them twice.
@@ -393,7 +410,12 @@ fn main() {
     );
     let objective_config = objective_config.as_str();
     let objective = make_objective(objective_config);
-    let edge_cols = required_edge_cols(objective_config);
+    let mut edge_cols = required_edge_cols(objective_config);
+    for key in edge_weight_keys.iter() {
+        if !edge_cols.contains(key) {
+            edge_cols.push(key.clone());
+        }
+    }
     for col in required_node_cols(objective_config) {
         if !sum_cols.contains(&col) {
             sum_cols.push(col);
@@ -460,6 +482,7 @@ fn main() {
         balance_ub: 0,
         variant,
         region_weights: region_weights.clone(),
+        edge_weight_keys: edge_weight_keys,
     };
 
     let mut graph_file = fs::File::open(&graph_json).unwrap();
