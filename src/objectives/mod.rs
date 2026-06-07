@@ -35,7 +35,7 @@ mod gingles_partial;
 mod polsby_popper;
 
 pub use banded_gingles_partial::BandedGinglesPartialState;
-pub use by_district_abs_deviation::ByDistrictAbsDeviationState;
+pub use by_district_abs_deviation::{AbsDevTotal, ByDistrictAbsDeviationState};
 pub use election_wins::ElectionWinsState;
 pub use gingles_partial::GinglesPartialState;
 pub use polsby_popper::{ensure_derived_perim_column, polsby_popper_autoderive, PolsbyPopperState};
@@ -77,7 +77,10 @@ pub enum ObjectiveConfig {
     /// Minimize the total absolute distance between a list of target shares and
     /// distinct districts.
     ///
-    /// For each district, `share = pov_counts / total_counts`. Given
+    /// For each district, `share = pov_counts / total_counts` (a within-district
+    /// share of two populations); alternatively the denominator can be a single
+    /// fixed global value, `share = pov_counts / total_count`, giving each
+    /// district's share of a global total. Given
     /// `target_values` of length `k` (with `1 <= k <= district count`), the
     /// score is the minimum total `|share - target|` over all matchings of the
     /// `k` targets to `k` *distinct* districts -- each target claims its own
@@ -116,6 +119,18 @@ pub enum ObjectiveConfig {
     /// }
     /// ```
     ///
+    /// To divide by a global constant instead of a per-district column, supply
+    /// `total_count` in place of `total_counts_col` (each district's share is
+    /// then `pov_counts / total_count`):
+    /// ```json
+    /// {
+    ///   "objective": "by_district_abs_deviation",
+    ///   "target_values": [0.1, 0.4, 0.6],
+    ///   "pov_counts_col": "BVAP",
+    ///   "total_count": 1000000
+    /// }
+    /// ```
+    ///
     /// Fields:
     /// - `target_values`: target shares, each a finite value in [0, 1]; length
     ///   must be between 1 and the district count (validated when the chain
@@ -124,12 +139,17 @@ pub enum ObjectiveConfig {
     ///   `target_values`; `target` is a finite share in [0, 1] and
     ///   `n_target_districts` a positive count (<= district count)
     /// - `pov_counts_col`: node attribute column for the population of interest (integer-valued)
-    /// - `total_counts_col`: node attribute column for the total population (integer-valued)
+    /// - `total_counts_col`: node attribute column for the total population
+    ///   (integer-valued); mutually exclusive with `total_count`
+    /// - `total_count`: a single positive global value used as the denominator
+    ///   for every district; takes precedence over `total_counts_col` if both
+    ///   are present
     ByDistrictAbsDeviation {
         /// Stored sorted ascending (see [`make_objective`]).
         target_values: &'static [f64],
         pov_counts_col: &'static str,
-        total_counts_col: &'static str,
+        /// Per-district column sum or a fixed global constant.
+        total: AbsDevTotal,
     },
 
     /// Maximize Gingles opportunity districts with next-partial-district augmentation.
@@ -284,13 +304,13 @@ impl ObjectiveConfig {
             ObjectiveConfig::ByDistrictAbsDeviation {
                 target_values,
                 pov_counts_col,
-                total_counts_col,
+                total,
             } => by_district_abs_deviation::full_score(
                 graph,
                 partition,
                 target_values,
                 pov_counts_col,
-                total_counts_col,
+                total,
             ),
             ObjectiveConfig::GinglesPartial {
                 threshold,
@@ -350,11 +370,13 @@ impl ObjectiveConfig {
         match self {
             ObjectiveConfig::ByDistrictAbsDeviation {
                 pov_counts_col,
-                total_counts_col,
+                total,
                 ..
             } => {
                 graph.cache_int_col(pov_counts_col);
-                graph.cache_int_col(total_counts_col);
+                if let AbsDevTotal::Column(col) = total {
+                    graph.cache_int_col(col);
+                }
             }
             ObjectiveConfig::ElectionWins { elections, .. } => {
                 for &(col_a, col_b) in elections.iter() {
@@ -564,13 +586,13 @@ impl IncrementalObjective for ObjectiveConfig {
             ObjectiveConfig::ByDistrictAbsDeviation {
                 target_values,
                 pov_counts_col,
-                total_counts_col,
+                total,
             } => ObjectiveState::ByDistrictAbsDeviation(ByDistrictAbsDeviationState::init(
                 graph,
                 partition,
                 target_values,
                 pov_counts_col,
-                total_counts_col,
+                total,
             )),
             ObjectiveConfig::ElectionWins {
                 elections,
@@ -652,7 +674,7 @@ impl IncrementalObjective for ObjectiveConfig {
                 ObjectiveConfig::ByDistrictAbsDeviation {
                     target_values,
                     pov_counts_col,
-                    total_counts_col,
+                    total,
                 },
                 ObjectiveState::ByDistrictAbsDeviation(state),
             ) => by_district_abs_deviation::score_proposal(
@@ -660,7 +682,7 @@ impl IncrementalObjective for ObjectiveConfig {
                 state,
                 target_values,
                 pov_counts_col,
-                total_counts_col,
+                *total,
                 proposal,
             ),
             (
@@ -738,7 +760,7 @@ impl IncrementalObjective for ObjectiveConfig {
                 ObjectiveConfig::ByDistrictAbsDeviation {
                     target_values,
                     pov_counts_col,
-                    total_counts_col,
+                    total,
                 },
                 ObjectiveState::ByDistrictAbsDeviation(s),
             ) => by_district_abs_deviation::apply_proposal(
@@ -746,7 +768,7 @@ impl IncrementalObjective for ObjectiveConfig {
                 s,
                 target_values,
                 pov_counts_col,
-                total_counts_col,
+                *total,
                 proposal,
             ),
             (
@@ -978,7 +1000,7 @@ mod incremental_tests {
         ObjectiveConfig::ByDistrictAbsDeviation {
             target_values: &[0.1, 0.25, 0.5],
             pov_counts_col: static_str("bvap"),
-            total_counts_col: static_str("vap"),
+            total: AbsDevTotal::Column(static_str("vap")),
         }
     }
 
@@ -987,7 +1009,7 @@ mod incremental_tests {
         ObjectiveConfig::ByDistrictAbsDeviation {
             target_values: &[0.05, 0.10, 0.20, 0.30],
             pov_counts_col: static_str("bvap"),
-            total_counts_col: static_str("vap"),
+            total: AbsDevTotal::Column(static_str("vap")),
         }
     }
 
@@ -996,7 +1018,17 @@ mod incremental_tests {
         ObjectiveConfig::ByDistrictAbsDeviation {
             target_values: &[0.2, 0.2],
             pov_counts_col: static_str("bvap"),
-            total_counts_col: static_str("vap"),
+            total: AbsDevTotal::Column(static_str("vap")),
+        }
+    }
+
+    /// Constant global denominator -> shares are each district's fraction of a
+    /// fixed total rather than a within-district ratio.
+    fn test_by_district_constant_total_config() -> ObjectiveConfig {
+        ObjectiveConfig::ByDistrictAbsDeviation {
+            target_values: &[0.05, 0.15, 0.25],
+            pov_counts_col: static_str("bvap"),
+            total: AbsDevTotal::Constant(100.0),
         }
     }
 
@@ -1105,6 +1137,11 @@ mod incremental_tests {
         run_equivalence_suite(test_by_district_uniform_config());
     }
 
+    #[test]
+    fn by_district_abs_deviation_constant_total_incremental_matches_full_score() {
+        run_equivalence_suite(test_by_district_constant_total_config());
+    }
+
     /// Full score for a path graph with one node per district, share = bvap/100.
     /// `targets` need not be sorted; the helper sorts them as the parser would.
     fn by_district_full_score(bvap: &[u32], targets: &[f64]) -> f64 {
@@ -1132,7 +1169,7 @@ mod incremental_tests {
         let obj = ObjectiveConfig::ByDistrictAbsDeviation {
             target_values,
             pov_counts_col: static_str("bvap"),
-            total_counts_col: static_str("vap"),
+            total: AbsDevTotal::Column(static_str("vap")),
         };
         obj.score(&graph, &partition)
     }
@@ -1190,6 +1227,46 @@ mod incremental_tests {
             shorthand.score(&graph, &partition),
             explicit.score(&graph, &partition),
             "shorthand vs explicit",
+        );
+    }
+
+    #[test]
+    fn by_district_abs_deviation_total_count_parses_and_scores() {
+        // `total_count` parses into a constant denominator.
+        let obj = make_objective(
+            r#"{"objective":"by_district_abs_deviation","target_values":[0.05,0.15,0.25],
+                "pov_counts_col":"bvap","total_count":100}"#,
+        );
+        match obj {
+            ObjectiveConfig::ByDistrictAbsDeviation { total, .. } => {
+                assert!(matches!(total, AbsDevTotal::Constant(t) if (t - 100.0).abs() < 1e-12));
+            }
+            _ => panic!("expected ByDistrictAbsDeviation"),
+        }
+
+        // A constant denominator only needs the pov column loaded.
+        let cols = required_node_cols(
+            r#"{"objective":"by_district_abs_deviation","target_values":[0.05,0.15,0.25],
+                "pov_counts_col":"bvap","total_count":100}"#,
+        );
+        assert_eq!(cols, vec!["bvap".to_string()]);
+
+        // Path graph, one node per district. With total_count = 100, shares are
+        // bvap/100 = [0.1, 0.3, 0.5]; targets [0.05, 0.15, 0.25] (k == num_dists)
+        // match order-preservingly: 0.05 + 0.15 + 0.25 = 0.45.
+        let mut graph = Graph::from_edge_list("0 1\n1 2", "1 1 1").unwrap();
+        graph
+            .attr
+            .insert("bvap".to_string(), vec!["10", "30", "50"].iter().map(|s| s.to_string()).collect());
+        let partition = Partition::from_assignments(&graph, &vec![1u32, 2, 3]).unwrap();
+        assert_close(obj.score(&graph, &partition), 0.45, "constant total worked example");
+
+        // Incremental path agrees with the full score after caching.
+        obj.cache_graph_cols(&mut graph);
+        assert_close(
+            obj.score_partition(&graph, &partition),
+            0.45,
+            "constant total worked example (incremental)",
         );
     }
 

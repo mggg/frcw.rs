@@ -1,7 +1,10 @@
 //! `by_district_abs_deviation` objective: minimize the total absolute distance
 //! between a list of target shares and distinct districts.
 //!
-//! For each district, `share = pov_counts / total_counts`. Given a list of
+//! For each district, `share = pov_counts / total_counts` (a within-district
+//! share of two populations); alternatively the denominator can be a single
+//! fixed global value, `share = pov_counts / total_count`, giving each
+//! district's share of a global total. Given a list of
 //! `target_values` (length `k`, with `1 <= k <= num_dists`), the score is the
 //! minimum total `|share - target|` over all ways of matching the `k` targets
 //! to `k` *distinct* districts -- i.e. each target claims its own district. On
@@ -23,6 +26,22 @@ use crate::partition::Partition;
 use crate::recom::RecomProposal;
 use crate::stats::partition_attr_sums;
 use serde_json::Value;
+
+/// Denominator for a district's population-of-interest share.
+///
+/// - [`AbsDevTotal::Column`] divides each district's `pov_counts` by that same
+///   district's sum of a node attribute column (`pov_counts / total_counts`),
+///   i.e. a within-district share of two populations.
+/// - [`AbsDevTotal::Constant`] divides every district's `pov_counts` by a single
+///   fixed global value (`pov_counts / total_count`), i.e. each district's share
+///   of a global total.
+#[derive(Clone, Copy, Debug)]
+pub enum AbsDevTotal {
+    /// Per-district sum of a node attribute column.
+    Column(&'static str),
+    /// A single fixed, positive global value shared by all districts.
+    Constant(f64),
+}
 
 /// Per-district cached state for an [`ObjectiveConfig::ByDistrictAbsDeviation`]
 /// objective.
@@ -101,13 +120,43 @@ fn by_district_abs_dev_score(shares: &[f64], sorted_targets: &[f64]) -> f64 {
     dp[k]
 }
 
-/// Per-district shares from per-district count sums.
-fn shares_from_counts(pov_counts: &[i32], total_counts: &[i32]) -> Vec<f64> {
-    pov_counts
-        .iter()
-        .zip(total_counts.iter())
-        .map(|(&p, &t)| district_share(p, t))
-        .collect()
+/// Per-district shares given each district's population-of-interest sum and the
+/// configured denominator. For a column denominator this sums the column over
+/// the partition; for a constant denominator every district divides by the same
+/// global value.
+fn shares_from_pov(
+    graph: &Graph,
+    partition: &Partition,
+    pov_counts: &[i32],
+    total: AbsDevTotal,
+) -> Vec<f64> {
+    match total {
+        AbsDevTotal::Column(col) => {
+            let total_counts = partition_attr_sums(graph, partition, col);
+            debug_assert_eq!(total_counts.len(), pov_counts.len());
+            pov_counts
+                .iter()
+                .zip(total_counts.iter())
+                .map(|(&p, &t)| district_share(p, t))
+                .collect()
+        }
+        AbsDevTotal::Constant(total) => pov_counts.iter().map(|&p| p as f64 / total).collect(),
+    }
+}
+
+/// District share for the nodes on one side of a proposal, honoring the
+/// configured denominator.
+fn proposal_share(
+    graph: &Graph,
+    pov_counts_col: &str,
+    total: AbsDevTotal,
+    nodes: &[usize],
+) -> f64 {
+    let pov = sum_attr_over(graph, pov_counts_col, nodes);
+    match total {
+        AbsDevTotal::Column(col) => district_share(pov, sum_attr_over(graph, col, nodes)),
+        AbsDevTotal::Constant(total) => pov as f64 / total,
+    }
 }
 
 /// Validates that there are at most one target per district.
@@ -126,17 +175,15 @@ impl ByDistrictAbsDeviationState {
         partition: &Partition,
         target_values: &[f64],
         pov_counts_col: &str,
-        total_counts_col: &str,
+        total: AbsDevTotal,
     ) -> ByDistrictAbsDeviationState {
         let num_dists = partition.num_dists as usize;
         assert_target_len(target_values, num_dists);
 
         let pov_counts = partition_attr_sums(graph, partition, pov_counts_col);
-        let total_counts = partition_attr_sums(graph, partition, total_counts_col);
         debug_assert_eq!(pov_counts.len(), num_dists);
-        debug_assert_eq!(total_counts.len(), num_dists);
 
-        let shares = shares_from_counts(&pov_counts, &total_counts);
+        let shares = shares_from_pov(graph, partition, &pov_counts, total);
         let score = by_district_abs_dev_score(&shares, target_values);
         ByDistrictAbsDeviationState { shares, score }
     }
@@ -156,6 +203,36 @@ fn parse_share(v: &Value, ctx: &str) -> f64 {
     t
 }
 
+/// Parses the share denominator from a config.
+///
+/// Two mutually exclusive forms are accepted:
+/// - `"total_count": t` -- a single positive global constant; each district's
+///   share is `pov_counts / t`, i.e. its share of a global total;
+/// - `"total_counts_col": "VAP"` -- a node attribute column summed per district;
+///   each district's share is `pov_counts / total_counts`.
+///
+/// `total_count` takes precedence if both are present.
+fn parse_total(data: &Value) -> AbsDevTotal {
+    if let Some(v) = data.get("total_count") {
+        let t = v
+            .as_f64()
+            .unwrap_or_else(|| panic!("'total_count' must be a number, got {}", v));
+        assert!(
+            t.is_finite() && t > 0.0,
+            "'total_count' must be a positive, finite number, got {}",
+            t
+        );
+        AbsDevTotal::Constant(t)
+    } else if data.get("total_counts_col").is_some() {
+        AbsDevTotal::Column(leak_str(data, "total_counts_col"))
+    } else {
+        panic!(
+            "by_district_abs_deviation requires either 'total_counts_col' (a node \
+             attribute column) or 'total_count' (a positive global constant)"
+        );
+    }
+}
+
 /// Parses a `by_district_abs_deviation` objective config.
 /// See [`super::make_objective`].
 ///
@@ -167,6 +244,8 @@ fn parse_share(v: &Value, ctx: &str) -> f64 {
 ///
 /// `target_values` takes precedence if both are present. The targets are stored
 /// **sorted ascending** so that scoring only needs to sort the district shares.
+///
+/// The share denominator is parsed by [`parse_total`].
 pub(super) fn from_json(data: &Value) -> ObjectiveConfig {
     let mut targets: Vec<f64> = if let Some(arr) =
         data.get("target_values").and_then(|v| v.as_array())
@@ -199,16 +278,22 @@ pub(super) fn from_json(data: &Value) -> ObjectiveConfig {
     ObjectiveConfig::ByDistrictAbsDeviation {
         target_values,
         pov_counts_col: leak_str(data, "pov_counts_col"),
-        total_counts_col: leak_str(data, "total_counts_col"),
+        total: parse_total(data),
     }
 }
 
 /// Node attribute columns required by a `by_district_abs_deviation` config.
+///
+/// The total-population column is required only when the denominator is a
+/// column; a constant `total_count` needs no extra column loaded.
 pub(super) fn required_node_cols(data: &Value) -> Vec<String> {
-    vec![
-        data["pov_counts_col"].as_str().unwrap().to_string(),
-        data["total_counts_col"].as_str().unwrap().to_string(),
-    ]
+    let mut cols = vec![data["pov_counts_col"].as_str().unwrap().to_string()];
+    if data.get("total_count").is_none() {
+        if let Some(col) = data.get("total_counts_col").and_then(|v| v.as_str()) {
+            cols.push(col.to_string());
+        }
+    }
+    cols
 }
 
 /// Full (non-incremental) score over every district.
@@ -217,13 +302,12 @@ pub(super) fn full_score(
     partition: &Partition,
     target_values: &[f64],
     pov_counts_col: &str,
-    total_counts_col: &str,
+    total: AbsDevTotal,
 ) -> f64 {
     let num_dists = partition.num_dists as usize;
     assert_target_len(target_values, num_dists);
     let pov_counts = partition_attr_sums(graph, partition, pov_counts_col);
-    let total_counts = partition_attr_sums(graph, partition, total_counts_col);
-    let shares = shares_from_counts(&pov_counts, &total_counts);
+    let shares = shares_from_pov(graph, partition, &pov_counts, total);
     by_district_abs_dev_score(&shares, target_values)
 }
 
@@ -232,17 +316,11 @@ pub(super) fn score_proposal(
     state: &ByDistrictAbsDeviationState,
     target_values: &[f64],
     pov_counts_col: &str,
-    total_counts_col: &str,
+    total: AbsDevTotal,
     proposal: &RecomProposal,
 ) -> f64 {
-    let new_a = district_share(
-        sum_attr_over(graph, pov_counts_col, &proposal.a_nodes),
-        sum_attr_over(graph, total_counts_col, &proposal.a_nodes),
-    );
-    let new_b = district_share(
-        sum_attr_over(graph, pov_counts_col, &proposal.b_nodes),
-        sum_attr_over(graph, total_counts_col, &proposal.b_nodes),
-    );
+    let new_a = proposal_share(graph, pov_counts_col, total, &proposal.a_nodes);
+    let new_b = proposal_share(graph, pov_counts_col, total, &proposal.b_nodes);
 
     let mut shares = state.shares.clone();
     shares[proposal.a_label] = new_a;
@@ -255,17 +333,11 @@ pub(super) fn apply_proposal(
     state: &mut ByDistrictAbsDeviationState,
     target_values: &[f64],
     pov_counts_col: &str,
-    total_counts_col: &str,
+    total: AbsDevTotal,
     proposal: &RecomProposal,
 ) {
-    let new_a = district_share(
-        sum_attr_over(graph, pov_counts_col, &proposal.a_nodes),
-        sum_attr_over(graph, total_counts_col, &proposal.a_nodes),
-    );
-    let new_b = district_share(
-        sum_attr_over(graph, pov_counts_col, &proposal.b_nodes),
-        sum_attr_over(graph, total_counts_col, &proposal.b_nodes),
-    );
+    let new_a = proposal_share(graph, pov_counts_col, total, &proposal.a_nodes);
+    let new_b = proposal_share(graph, pov_counts_col, total, &proposal.b_nodes);
 
     state.shares[proposal.a_label] = new_a;
     state.shares[proposal.b_label] = new_b;
