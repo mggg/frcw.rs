@@ -1,6 +1,6 @@
 // Functional tests for short bursts optimization.
 use frcw::graph::Graph;
-use frcw::objectives::make_objective;
+use frcw::objectives::{make_objective, IncrementalObjective};
 use frcw::partition::Partition;
 use frcw::recom::short_bursts::multi_short_bursts_with_writer;
 use frcw::recom::RecomProposal;
@@ -368,14 +368,150 @@ fn test_short_bursts_write_best_only_cross_validation() {
         all_writer.partitions.len()
     );
 
-    // best_score column must be strictly non-decreasing.
-    let mut prev_best: f64 = f64::NEG_INFINITY;
-    for line in scores_lines.iter().skip(1) {
+    // Header is the bare `step,score` (election_wins exposes no per-district
+    // scores), with no best_score column. Each data row carries a contiguous
+    // step index and a parseable score.
+    assert_eq!(scores_lines[0], "step,score");
+    for (offset, line) in scores_lines.iter().skip(1).enumerate() {
         let fields: Vec<&str> = line.split(',').collect();
-        let best = fields[2].parse::<f64>().unwrap();
-        assert!(best >= prev_best, "best_score decreased: {} < {}", best, prev_best);
-        prev_best = best;
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].parse::<u64>().unwrap(), offset as u64);
+        fields[1].parse::<f64>().unwrap();
     }
+
+    fs::remove_file(scores_path).unwrap();
+}
+
+// =================================================================================
+// == Per-district vector freshness: every scores CSV row must carry the
+// == per-district vector of *that row's* plan, not a stale cached vector.
+// ==
+// == Regression test for per-step recompute. Short bursts previously replayed
+// == the last cached district vector on non-best steps (and, under
+// == write_best_only, always emitted the seed vector). We reconstruct each
+// == row's plan from a stats writer and recompute its district scores
+// == independently, then require an exact match against the CSV d_* columns.
+// =================================================================================
+
+#[test]
+fn test_short_bursts_scores_district_vector_tracks_each_step() {
+    use std::fs;
+
+    // gingles_partial exposes a per-district vector (min_pop / total_pop per
+    // district) that shifts as the plan moves. a_share / population are
+    // integer columns on the 6x6 fixture.
+    let config = r#"{"objective":"gingles_partial","threshold":0.5,"min_pop":"a_share","total_pop":"population"}"#;
+    let (mut graph, partition) = fixture_with_attributes("6x6", vec!["a_share", "population"]);
+    let scorer = make_objective(config);
+    scorer.cache_graph_cols(&mut graph);
+
+    let initial_partition = partition.clone();
+    let params = make_params(80);
+    let burst_length = 5;
+
+    let mut stats_writer = RecordingWriter::new();
+    let scores_path = std::env::temp_dir().join(format!(
+        "frcw_sb_district_vector_{}_{}.csv",
+        std::process::id(),
+        RNG_SEED
+    ));
+    let scores_out = Box::new(std::io::BufWriter::new(
+        fs::File::create(&scores_path).unwrap(),
+    ));
+    let mut scores_writer = ScoresWriter::new(scores_out);
+
+    multi_short_bursts_with_writer(
+        &graph,
+        partition,
+        &params,
+        1,
+        IncrementalBackend {
+            objective: make_objective(config),
+        },
+        true,
+        burst_length,
+        Some(&mut stats_writer),
+        Some(&mut scores_writer),
+        false,
+        false, // write_best_only=false (every accepted step)
+    )
+    .unwrap();
+
+    // Independently recompute a plan's per-district vector via the objective.
+    let recompute = |p: &Partition| -> Vec<f64> {
+        let state = scorer.init(&graph, p);
+        scorer.district_scores(&state)
+    };
+
+    let parse_districts = |line: &str| -> Vec<f64> {
+        line.split(',')
+            .skip(2)
+            .map(|f| f.parse::<f64>().unwrap())
+            .collect()
+    };
+
+    let assert_close = |csv: &[f64], expected: &[f64], ctx: &str| {
+        assert_eq!(
+            csv.len(),
+            expected.len(),
+            "district vector length mismatch ({})",
+            ctx
+        );
+        for (i, (got, want)) in csv.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-9,
+                "district {} mismatch ({}): csv={} recomputed={}",
+                i,
+                ctx,
+                got,
+                want
+            );
+        }
+    };
+
+    let scores_content = fs::read_to_string(&scores_path).unwrap();
+    let scores_lines: Vec<&str> = scores_content.lines().collect();
+    assert!(
+        scores_lines[0].starts_with("step,score,d_0"),
+        "expected per-district header, got: {}",
+        scores_lines[0]
+    );
+
+    // Data rows: [0] = step-0 seed (initial plan); [i] for i>=1 = the i-th
+    // accepted step, whose plan the stats writer captured at index i-1.
+    let data_lines: Vec<&str> = scores_lines[1..].to_vec();
+    assert_eq!(
+        data_lines.len(),
+        stats_writer.partitions.len() + 1,
+        "scores rows should be one seed row plus one per accepted step"
+    );
+
+    assert_close(
+        &parse_districts(data_lines[0]),
+        &recompute(&initial_partition),
+        "seed row",
+    );
+
+    let seed_vec = parse_districts(data_lines[0]);
+    let mut saw_change = false;
+    for (i, line) in data_lines.iter().enumerate().skip(1) {
+        let csv_vec = parse_districts(line);
+        assert_close(
+            &csv_vec,
+            &recompute(&stats_writer.partitions[i - 1]),
+            "step row",
+        );
+        if csv_vec != seed_vec {
+            saw_change = true;
+        }
+    }
+
+    // Sanity: the plan actually moved, so the per-step comparison is not
+    // passing vacuously against a constant (e.g. always-seed) vector.
+    assert!(
+        saw_change,
+        "expected the per-district vector to change across steps"
+    );
 
     fs::remove_file(scores_path).unwrap();
 }

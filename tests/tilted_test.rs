@@ -417,18 +417,17 @@ fn test_tilted_scores_writer_records_every_step() {
     .unwrap();
     let scores = fs::read_to_string(&path).unwrap();
     let lines = scores.lines().collect::<Vec<_>>();
-    assert_eq!(lines[0], "step,score,best_score");
+    // FullRescoreBackend exposes no per-district scores, so the header is the
+    // bare `step,score` (no best_score column).
+    assert_eq!(lines[0], "step,score");
     // header + init seed row + (num_steps - 1) chain events = num_steps + 1 lines
     assert_eq!(lines.len(), params.num_steps as usize + 1);
 
-    let mut previous_best = f64::NEG_INFINITY;
     for (idx, line) in lines.iter().enumerate().skip(1) {
         let fields = line.split(',').collect::<Vec<_>>();
-        assert_eq!(fields.len(), 3);
+        assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].parse::<usize>().unwrap(), idx - 1);
-        let best_score = fields[2].parse::<f64>().unwrap();
-        assert!(best_score >= previous_best);
-        previous_best = best_score;
+        fields[1].parse::<f64>().unwrap();
     }
     let final_score = dist0_pop_objective(&graph, &final_partition);
     let last_fields = lines.last().unwrap().split(',').collect::<Vec<_>>();
@@ -1184,7 +1183,7 @@ fn test_backends_agree_on_full_score_trajectory() {
 
     // Per-step score (column 1) must match exactly. The full-rescore writer
     // emits no district columns; the incremental writer emits per-district
-    // columns, so we only compare step + score + best_score.
+    // columns, so we only compare step + score.
     for (idx, (full_line, inc_line)) in full_lines.iter().zip(inc_lines.iter()).enumerate() {
         if idx == 0 {
             continue; // header
@@ -1192,8 +1191,8 @@ fn test_backends_agree_on_full_score_trajectory() {
         let full_fields: Vec<&str> = full_line.split(',').collect();
         let inc_fields: Vec<&str> = inc_line.split(',').collect();
         assert_eq!(
-            &full_fields[..3],
-            &inc_fields[..3],
+            &full_fields[..2],
+            &inc_fields[..2],
             "trajectories diverge at line {}: full={} inc={}",
             idx,
             full_line,

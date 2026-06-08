@@ -55,8 +55,6 @@ pub(super) struct TiltedScorePacket {
     pub(super) last_step: u64,
     /// Objective score for each step in this packet.
     pub(super) score: f64,
-    /// Best score seen so far for each step in this packet.
-    pub(super) best_score: f64,
     /// Per-district scores to carry forward from this point on, if the chain
     /// state changed. `None` on pure-rejection runs, where the writer keeps
     /// reusing its previously cached vector.

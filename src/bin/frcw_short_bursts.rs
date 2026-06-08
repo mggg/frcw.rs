@@ -250,7 +250,7 @@ fn main() {
             Arg::new("scores-output-file")
                 .long("scores-output-file")
                 .help(
-                    "Path to write per-burst objective scores as CSV with step, score, and best_score.",
+                    "Path to write per-burst objective scores as CSV with step, score, and per-district score columns.",
                 ),
         )
         .arg(

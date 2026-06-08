@@ -68,8 +68,6 @@ pub(super) struct BurstScorePacket {
     pub(super) step: u64,
     /// Objective score at this event.
     pub(super) score: f64,
-    /// Best score seen so far.
-    pub(super) best_score: f64,
     /// Per-district scores to carry forward, or `None` to reuse the writer's
     /// previously cached vector.
     pub(super) district_scores: Option<Vec<f64>>,

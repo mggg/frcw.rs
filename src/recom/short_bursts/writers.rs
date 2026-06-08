@@ -58,7 +58,7 @@ pub(super) fn start_burst_stats_writer(
 /// Mirrors the tilted-run score writer: caches the most recent
 /// `district_scores` vector and replays it for any packet that omits a fresh
 /// vector. An empty `initial_district_scores` switches the writer into the
-/// legacy three-column `step,score,best_score` output.
+/// bare `step,score` output.
 ///
 /// # Arguments
 ///
@@ -84,7 +84,7 @@ pub(super) fn start_burst_score_writer(
             last_districts = new_districts;
         }
         writer
-            .step(next.step, next.score, next.best_score, &last_districts)
+            .step(next.step, next.score, &last_districts)
             .unwrap();
         writer.flush().unwrap();
         next = recv.recv().unwrap();
