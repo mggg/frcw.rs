@@ -167,6 +167,18 @@ fn main() {
                     ),
             )
             .arg(
+                Arg::new("edge_weight_keys")
+                    .long("edge-weight-keys")
+                    .value_parser(value_parser!(String))
+                    .num_args(1..)
+                    .help(
+                        "Per-edge attribute columns whose values are added to edge weights \
+                    in RMST / region-aware spanning-tree sampling. An edge missing a key \
+                    contributes 0; a key present on no edge is an error. \
+                    Only valid with the rmst and region-aware variants.",
+                    ),
+            )
+            .arg(
                 Arg::new("cut_edges_count")
                     .long("cut-edges-count")
                     .action(ArgAction::SetTrue)
@@ -265,15 +277,47 @@ fn main() {
         .unwrap_or_default()
         .map(|c| c.to_string())
         .collect();
+    let edge_weight_keys: Vec<String> = matches
+        .get_many::<String>("edge_weight_keys")
+        .unwrap_or_default()
+        .map(|c| c.to_string())
+        .collect();
     let region_weights_raw = (*matches.get_one::<String>("region_weights").unwrap()).as_str();
+    let region_weights = parse_region_weights_config(region_weights_raw);
 
+    // When region weights are supplied, transparently upgrade the RMST/cut-edges
+    // variants to their region-aware counterparts so the weights actually take
+    // effect (the plain RMST sampler ignores them). UST and reversible variants
+    // have no region-aware implementation, so reject the combination instead of
+    // silently dropping the weights.
     let variant = match variant_str {
-        "reversible" => RecomVariant::Reversible,
-        "cut-edges-ust" => RecomVariant::CutEdgesUST,
-        "cut-edges-rmst" => RecomVariant::CutEdgesRMST,
+        "reversible" => match region_weights {
+            None => RecomVariant::Reversible,
+            Some(_) => {
+                panic!("Region-aware variants are not currently implemented for reversible recom.")
+            }
+        },
+        "cut-edges-ust" => match region_weights {
+            None => RecomVariant::CutEdgesUST,
+            Some(_) => {
+                panic!("Region-aware variants are not currently implemented for uniform spanning tree sampling.")
+            }
+        },
+        "cut-edges-rmst" => match region_weights {
+            None => RecomVariant::CutEdgesRMST,
+            Some(_) => RecomVariant::CutEdgesRegionAware,
+        },
         "cut-edges-region-aware" => RecomVariant::CutEdgesRegionAware,
-        "district-pairs-ust" => RecomVariant::DistrictPairsUST,
-        "district-pairs-rmst" => RecomVariant::DistrictPairsRMST,
+        "district-pairs-ust" => match region_weights {
+            None => RecomVariant::DistrictPairsUST,
+            Some(_) => {
+                panic!("Region-aware variants are not currently implemented for uniform spanning tree sampling.")
+            }
+        },
+        "district-pairs-rmst" => match region_weights {
+            None => RecomVariant::DistrictPairsRMST,
+            Some(_) => RecomVariant::DistrictPairsRegionAware,
+        },
         "district-pairs-region-aware" => RecomVariant::DistrictPairsRegionAware,
         bad => panic!("Parameter error: invalid variant '{}'", bad),
     };
@@ -315,7 +359,6 @@ fn main() {
         panic!("Parameter error: '--tol' must be between 0 and 1.");
     }
 
-    let region_weights = parse_region_weights_config(region_weights_raw);
     // Add the keys in the region weights to sum_cols if they are not there already
     // so that the user doesn't have to
     if let Some(weight_pairs_vec) = &region_weights {
@@ -332,7 +375,7 @@ fn main() {
         assignment_col,
         sum_cols,
         vec![],
-        vec![],
+        edge_weight_keys.clone(),
     )
         .unwrap_or_else(|e| {
             panic!(
@@ -357,6 +400,7 @@ fn main() {
         balance_ub: balance_ub,
         variant: variant,
         region_weights: region_weights.clone(),
+        edge_weight_keys: edge_weight_keys,
     };
 
     let mut graph_file = fs::File::open(&graph_json).unwrap();

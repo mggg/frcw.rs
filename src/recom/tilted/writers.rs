@@ -48,10 +48,10 @@ pub(super) fn start_tilted_stats_writer(
 /// * `writer` - Score writer receiving per-step objective scores.
 /// * `initial_score` - Objective score of the starting partition.
 /// * `initial_district_scores` - Per-district score vector for the starting
-///   partition. An empty vector switches the writer to the legacy three-column
-///   `step,score,best_score` output; a non-empty vector emits
-///   `step,score,best_score,d_0,...,d_{N-1}` and the writer caches it so
-///   pure-rejection packets can replay the last-known district scores.
+///   partition. An empty vector switches the writer to the bare `step,score`
+///   output; a non-empty vector emits `step,score,d_0,...,d_{N-1}` and the
+///   writer caches it so pure-rejection packets can replay the last-known
+///   district scores.
 /// * `recv` - Channel receiving asynchronous score write packets.
 pub(super) fn start_tilted_score_writer(
     writer: &mut ScoresWriter,
@@ -70,7 +70,7 @@ pub(super) fn start_tilted_score_writer(
         }
         for step in next.first_step..=next.last_step {
             writer
-                .step(step, next.score, next.best_score, &last_districts)
+                .step(step, next.score, &last_districts)
                 .unwrap();
         }
         next = recv.recv().unwrap();

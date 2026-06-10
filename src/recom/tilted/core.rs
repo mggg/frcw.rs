@@ -153,8 +153,6 @@ struct TiltedMainState<S: Send + Clone> {
     backend_state: S,
     /// Objective score of `partition`.
     current_score: f64,
-    /// Best score seen so far.
-    best_score: f64,
     /// Tilted rejection counts since the last accepted proposal.
     pending_counts: SelfLoopCounts,
 }
@@ -165,7 +163,6 @@ impl<S: Send + Clone> TiltedMainState<S> {
     fn new(partition: Partition, backend_state: S, current_score: f64) -> Self {
         Self {
             step: 0,
-            best_score: current_score,
             pending_counts: SelfLoopCounts::default(),
             partition,
             backend_state,
@@ -192,7 +189,6 @@ impl<S: Send + Clone> TiltedMainState<S> {
                 first_step,
                 last_step: self.step,
                 score: self.current_score,
-                best_score: self.best_score,
                 district_scores: None,
                 terminate: false,
             })
@@ -207,7 +203,6 @@ impl<S: Send + Clone> TiltedMainState<S> {
     /// * `graph` - Graph backing the partition; passed to `backend.apply_accepted`.
     /// * `backend` - Scoring backend whose `apply_accepted` updates the partition.
     /// * `accepted` - Proposal selected by the main-thread interleaving step.
-    /// * `maximize` - If true, larger scores are improvements; otherwise smaller scores are.
     /// * `stats_send` - Optional channel for accepted proposal statistics.
     /// * `score_send` - Optional channel for per-step objective-score records.
     fn apply_accepted_proposal<B>(
@@ -215,7 +210,6 @@ impl<S: Send + Clone> TiltedMainState<S> {
         graph: &Graph,
         backend: &B,
         accepted: &ScoredProposal,
-        maximize: bool,
         stats_send: Option<&Sender<TiltedStatsPacket>>,
         score_send: Option<&Sender<TiltedScorePacket>>,
     ) where
@@ -230,14 +224,6 @@ impl<S: Send + Clone> TiltedMainState<S> {
         );
         self.current_score = accepted.score;
 
-        let is_new_best = if maximize {
-            accepted.score > self.best_score
-        } else {
-            accepted.score < self.best_score
-        };
-        if is_new_best {
-            self.best_score = accepted.score;
-        }
         if let Some(send) = stats_send {
             send.send(TiltedStatsPacket {
                 step: self.step,
@@ -254,7 +240,6 @@ impl<S: Send + Clone> TiltedMainState<S> {
                 first_step: self.step,
                 last_step: self.step,
                 score: self.current_score,
-                best_score: self.best_score,
                 district_scores: backend.step_district_scores(&self.backend_state),
                 terminate: false,
             })
@@ -296,7 +281,6 @@ impl<S: Send + Clone> TiltedMainState<S> {
 /// * `params` - ReCom parameters containing the target step count.
 /// * `rng` - Main-thread RNG used for event interleaving and proposal selection.
 /// * `job_sends` - Worker job channels for broadcasting state updates.
-/// * `maximize` - If true, larger scores are improvements; otherwise smaller scores are.
 /// * `stats_send` - Optional channel for accepted proposal statistics.
 /// * `score_send` - Optional channel for per-step objective-score records.
 fn interleave_tilted_round<B>(
@@ -308,7 +292,6 @@ fn interleave_tilted_round<B>(
     effective_steps: u64,
     rng: &mut SmallRng,
     job_sends: &[Sender<TiltedJobPacket>],
-    maximize: bool,
     stats_send: Option<&Sender<TiltedStatsPacket>>,
     score_send: Option<&Sender<TiltedScorePacket>>,
 ) where
@@ -333,7 +316,7 @@ fn interleave_tilted_round<B>(
         }
 
         let accepted = &proposals[rng.random_range(0..proposals.len())];
-        state.apply_accepted_proposal(graph, backend, accepted, maximize, stats_send, score_send);
+        state.apply_accepted_proposal(graph, backend, accepted, stats_send, score_send);
         send_tilted_jobs(job_sends, Some(&accepted.proposal), state.current_score);
         break; // need new round (state changed)
     }
@@ -349,7 +332,6 @@ fn interleave_tilted_round<B>(
 /// * `result_recv` - Shared result channel from all workers.
 /// * `job_sends` - Worker job channels.
 /// * `rng` - Main-thread RNG used for interleaving.
-/// * `maximize` - If true, larger scores are improvements; otherwise smaller scores are.
 /// * `stats_send` - Optional channel for accepted proposal statistics.
 /// * `score_send` - Optional channel for per-step objective-score records.
 /// * `progress_bar` - Optional progress bar tracking total chain steps.
@@ -363,7 +345,6 @@ fn run_tilted_main_loop<B>(
     result_recv: &Receiver<TiltedResultPacket>,
     job_sends: &[Sender<TiltedJobPacket>],
     rng: &mut SmallRng,
-    maximize: bool,
     stats_send: Option<&Sender<TiltedStatsPacket>>,
     score_send: Option<&Sender<TiltedScorePacket>>,
     progress_bar: Option<&ProgressBar>,
@@ -387,7 +368,6 @@ fn run_tilted_main_loop<B>(
             effective_steps,
             rng,
             job_sends,
-            maximize,
             stats_send,
             score_send,
         );
@@ -682,7 +662,6 @@ where
             &result_recv,
             &job_sends,
             &mut rng,
-            maximize,
             stats_send.as_ref(),
             score_send.as_ref(),
             progress_bar_ref,
@@ -703,7 +682,6 @@ where
                 first_step: 0,
                 last_step: 0,
                 score: 0.0,
-                best_score: 0.0,
                 district_scores: None,
                 terminate: true,
             })

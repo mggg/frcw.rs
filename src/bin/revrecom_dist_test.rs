@@ -131,6 +131,7 @@ fn main() {
         balance_ub: balance_ub,
         variant: RecomVariant::Reversible,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
 
     let output_buffer = Box::new(std::io::BufWriter::new(std::io::stdout()));

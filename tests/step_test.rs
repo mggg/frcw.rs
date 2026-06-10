@@ -297,6 +297,7 @@ fn test_chain_invariants_recom_grid(
         balance_ub: 0,
         variant: variant,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let writer = Box::new(StepInvariantWriter::new(params.clone(), true)) as Box<dyn StatsWriter>;
     let _ = multi_chain(
@@ -320,6 +321,7 @@ fn test_chain_invariants_revrecom_grid(
         balance_ub: pop_range.1 - pop_range.0 + 1,
         variant: RecomVariant::Reversible,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let writer = Box::new(StepInvariantWriter::new(params.clone(), true)) as Box<dyn StatsWriter>;
     let _ = multi_chain(
@@ -344,6 +346,7 @@ fn test_chain_invariants_recom_iowa(
         balance_ub: 0,
         variant: variant,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let writer = Box::new(StepInvariantWriter::new(params.clone(), true)) as Box<dyn StatsWriter>;
     let _ = multi_chain(
@@ -370,6 +373,7 @@ fn test_chain_invariants_revrecom_iowa(
         balance_ub: balance_ub,
         variant: RecomVariant::Reversible,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let writer = Box::new(StepInvariantWriter::new(params.clone(), true)) as Box<dyn StatsWriter>;
     let _ = multi_chain(
@@ -395,6 +399,7 @@ fn test_chain_invariants_revrecom_large_states(
         balance_ub: 30,
         variant: RecomVariant::Reversible,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let writer = Box::new(StepInvariantWriter::new(params.clone(), false)) as Box<dyn StatsWriter>;
     let _ = multi_chain(

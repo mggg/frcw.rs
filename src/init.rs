@@ -286,10 +286,14 @@ pub fn graph_from_networkx(
     let mut edge_attr: HashMap<String, Vec<f64>> = HashMap::new();
     if !edge_float_cols.is_empty() {
         for col in edge_float_cols.iter() {
+            // Track how many edges actually carry the key as a number. An edge
+            // missing the key contributes 0; a column present on no edge at all
+            // is an error.
+            let mut present = 0usize;
             let col_vals: Vec<f64> = edges
                 .iter()
                 .map(|Edge(u, v)| {
-                    raw_adj[*u]
+                    let val = raw_adj[*u]
                         .as_array()
                         .unwrap()
                         .iter()
@@ -300,10 +304,26 @@ pub fn graph_from_networkx(
                             .unwrap();
                             node_id_to_index.get(&nid).copied() == Some(*v)
                         })
-                        .and_then(|entry| entry[col.as_str()].as_f64())
-                        .unwrap_or(0.0)
+                        .and_then(|entry| entry[col.as_str()].as_f64());
+                    match val {
+                        Some(x) => {
+                            present += 1;
+                            x
+                        }
+                        None => 0.0,
+                    }
                 })
                 .collect();
+            if present == 0 {
+                return Err(serde_json::Error::io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Edge attribute column '{}' is present on no edge in the graph. \
+                         Every requested edge attribute must appear on at least one edge.",
+                        col
+                    ),
+                )));
+            }
             edge_attr.insert(col.clone(), col_vals);
         }
     }
@@ -392,6 +412,72 @@ mod tests {
         );
         assert_eq!(graph.edges, vec![Edge(0, 1), Edge(1, 2), Edge(2, 3)]);
         assert_eq!(connected_component_count(&graph), 1);
+    }
+
+    #[test]
+    fn edge_float_col_missing_on_some_edges_defaults_to_zero() {
+        // Path 1-2-3: only the 1-2 edge carries `barrier`. The 2-3 edge is
+        // missing the key and must default to 0 (not an error).
+        let json = serde_json::json!({
+            "directed": false,
+            "multigraph": false,
+            "graph": [],
+            "nodes": [
+                {"id": 1, "population": 1},
+                {"id": 2, "population": 1},
+                {"id": 3, "population": 1}
+            ],
+            "adjacency": [
+                [{"id": 2, "barrier": 5.0}],
+                [{"id": 1, "barrier": 5.0}, {"id": 3}],
+                [{"id": 2}]
+            ]
+        });
+        let path = write_temp_graph(&json.to_string());
+        let path_str = path.to_string_lossy();
+        let (graph, _) = graph_from_networkx(
+            &path_str,
+            "population",
+            vec![],
+            vec![],
+            vec!["barrier".to_string()],
+        )
+        .unwrap();
+        fs::remove_file(path).unwrap();
+
+        assert_eq!(graph.edges, vec![Edge(0, 1), Edge(1, 2)]);
+        assert_eq!(graph.edge_attr["barrier"], vec![5.0, 0.0]);
+    }
+
+    #[test]
+    fn edge_float_col_absent_on_all_edges_errors() {
+        // No edge carries `ghost`, so requesting it must error rather than
+        // silently producing an all-zero column.
+        let json = serde_json::json!({
+            "directed": false,
+            "multigraph": false,
+            "graph": [],
+            "nodes": [
+                {"id": 1, "population": 1},
+                {"id": 2, "population": 1}
+            ],
+            "adjacency": [
+                [{"id": 2}],
+                [{"id": 1}]
+            ]
+        });
+        let path = write_temp_graph(&json.to_string());
+        let path_str = path.to_string_lossy();
+        let result = graph_from_networkx(
+            &path_str,
+            "population",
+            vec![],
+            vec![],
+            vec!["ghost".to_string()],
+        );
+        fs::remove_file(path).unwrap();
+
+        assert!(result.is_err(), "absent edge column should error");
     }
 
     #[test]

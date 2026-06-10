@@ -386,9 +386,7 @@ where
         let mut score = initial_score;
 
         // Best-so-far over the entire run. The optimizer returns the best
-        // partition seen, not the chain's final mid-burst state. The
-        // running score is also reported as `best_score` on every score
-        // writer row.
+        // partition seen, not the chain's final mid-burst state.
         let mut global_best_partition = partition.clone();
         let mut global_best_state = state.clone();
         let mut global_best = initial_score;
@@ -453,15 +451,13 @@ where
                     .unwrap();
                 }
                 if let Some(send) = score_send.as_ref() {
-                    let ds = if strict_global {
-                        backend.step_district_scores(&state)
-                    } else {
-                        None
-                    };
+                    // Recompute the per-district vector for this step so the
+                    // d_* columns reflect the current plan rather than the
+                    // last cached vector (matches the tilted engine).
+                    let ds = backend.step_district_scores(&state);
                     send.send(BurstScorePacket {
                         step: writer_step,
                         score,
-                        best_score: global_best,
                         district_scores: ds,
                         terminate: false,
                     })
@@ -496,27 +492,15 @@ where
                         .unwrap();
                     }
                     if let Some(send) = score_send.as_ref() {
-                        // Per-district scores are recomputed for the
-                        // snapped state when it differs from the running
-                        // global best (i.e. the snap surfaced a plan that
-                        // is also a global high-water mark).
-                        let strict_global_after_snap = if maximize {
-                            score > global_best
-                        } else {
-                            score < global_best
-                        };
-                        if strict_global_after_snap {
-                            global_best = score;
-                        }
-                        let ds = if strict_global_after_snap {
-                            backend.step_district_scores(&state)
-                        } else {
-                            None
-                        };
+                        // Recompute the per-district vector for the snapped
+                        // plan so the d_* columns reflect this row's score
+                        // rather than the last cached vector. (global_best is
+                        // already maintained by the unconditional per-step
+                        // best tracking above, so no update is needed here.)
+                        let ds = backend.step_district_scores(&state);
                         send.send(BurstScorePacket {
                             step: writer_step,
                             score,
-                            best_score: global_best,
                             district_scores: ds,
                             terminate: false,
                         })
@@ -574,7 +558,6 @@ where
                 send.send(BurstScorePacket {
                     step: writer_step,
                     score: global_best,
-                    best_score: global_best,
                     district_scores: ds,
                     terminate: false,
                 })
@@ -594,7 +577,6 @@ where
             send.send(BurstScorePacket {
                 step: 0,
                 score: 0.0,
-                best_score: 0.0,
                 district_scores: None,
                 terminate: true,
             })

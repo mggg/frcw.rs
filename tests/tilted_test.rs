@@ -175,6 +175,7 @@ fn test_tilted_partition_valid_grid(
         balance_ub: 0,
         variant: RecomVariant::DistrictPairsRMST,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let result = multi_tilted_runs(
         &graph,
@@ -210,6 +211,7 @@ fn test_tilted_hill_climbing_maximize_grid() {
         balance_ub: 0,
         variant: RecomVariant::DistrictPairsRMST,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let final_partition = multi_tilted_runs(
         &graph,
@@ -245,6 +247,7 @@ fn test_tilted_hill_climbing_minimize_grid() {
         balance_ub: 0,
         variant: RecomVariant::DistrictPairsRMST,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let final_partition = multi_tilted_runs(
         &graph,
@@ -279,6 +282,7 @@ fn test_tilted_rejects_zero_threads() {
         balance_ub: 0,
         variant: RecomVariant::DistrictPairsRMST,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let err = multi_tilted_runs(
         &graph,
@@ -316,6 +320,7 @@ fn test_tilted_returns_terminal_partition_not_best_seen() {
         balance_ub: 0,
         variant: RecomVariant::DistrictPairsRMST,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let final_partition = multi_tilted_runs(
         &graph,
@@ -345,6 +350,7 @@ fn test_tilted_stats_writer_records_accepted_steps() {
         balance_ub: 0,
         variant: RecomVariant::DistrictPairsRMST,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let mut stats_writer = CountingStatsWriter::new();
     multi_tilted_runs_with_writer(
@@ -385,6 +391,7 @@ fn test_tilted_scores_writer_records_every_step() {
         balance_ub: 0,
         variant: RecomVariant::DistrictPairsRMST,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let path = std::env::temp_dir().join(format!(
         "frcw_tilted_scores_{}_{}.csv",
@@ -410,18 +417,17 @@ fn test_tilted_scores_writer_records_every_step() {
     .unwrap();
     let scores = fs::read_to_string(&path).unwrap();
     let lines = scores.lines().collect::<Vec<_>>();
-    assert_eq!(lines[0], "step,score,best_score");
+    // FullRescoreBackend exposes no per-district scores, so the header is the
+    // bare `step,score` (no best_score column).
+    assert_eq!(lines[0], "step,score");
     // header + init seed row + (num_steps - 1) chain events = num_steps + 1 lines
     assert_eq!(lines.len(), params.num_steps as usize + 1);
 
-    let mut previous_best = f64::NEG_INFINITY;
     for (idx, line) in lines.iter().enumerate().skip(1) {
         let fields = line.split(',').collect::<Vec<_>>();
-        assert_eq!(fields.len(), 3);
+        assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].parse::<usize>().unwrap(), idx - 1);
-        let best_score = fields[2].parse::<f64>().unwrap();
-        assert!(best_score >= previous_best);
-        previous_best = best_score;
+        fields[1].parse::<f64>().unwrap();
     }
     let final_score = dist0_pop_objective(&graph, &final_partition);
     let last_fields = lines.last().unwrap().split(',').collect::<Vec<_>>();
@@ -445,6 +451,7 @@ fn test_tilted_canonical_writer_mixed_ending_counts(
         balance_ub: 0,
         variant: RecomVariant::DistrictPairsRMST,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let path = std::env::temp_dir().join(format!(
         "frcw_tilted_mixed_{}_{}_{}_{}.jsonl",
@@ -530,6 +537,7 @@ fn test_tilted_canonical_writer_flushes_terminal_self_loops() {
         balance_ub: 0,
         variant: RecomVariant::DistrictPairsRMST,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let path = std::env::temp_dir().join(format!(
         "frcw_tilted_canonical_{}_{}.jsonl",
@@ -653,6 +661,7 @@ fn test_tilted_iowa_election_wins(
         balance_ub: 0,
         variant: RecomVariant::DistrictPairsRMST,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let config = r#"{"objective":"election_wins","elections":[{"votes_a":"PRES16D","votes_b":"PRES16R"}],"target":"a","aggregation":"mean"}"#;
     let obj_fn = make_objective_fn(config);
@@ -686,6 +695,7 @@ fn test_tilted_iowa_hill_climbing_maximize() {
         balance_ub: 0,
         variant: RecomVariant::DistrictPairsRMST,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let config = r#"{"objective":"election_wins","elections":[{"votes_a":"PRES16D","votes_b":"PRES16R"}],"target":"a","aggregation":"mean"}"#;
     let obj_fn = make_objective_fn(config);
@@ -730,6 +740,7 @@ fn test_tilted_virginia_election_wins(#[values(1, 4)] n_threads: usize) {
         balance_ub: 0,
         variant: RecomVariant::DistrictPairsRMST,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let config = r#"{"objective":"election_wins","elections":[{"votes_a":"G18DSEN","votes_b":"G18RSEN"}],"target":"a","aggregation":"mean"}"#;
     let obj_fn = make_objective_fn(config);
@@ -764,6 +775,7 @@ fn test_tilted_virginia_multi_election() {
         balance_ub: 0,
         variant: RecomVariant::DistrictPairsRMST,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let config = r#"{"objective":"election_wins","elections":[{"votes_a":"G18DSEN","votes_b":"G18RSEN"},{"votes_a":"G16DPRS","votes_b":"G16RPRS"}],"target":"a","aggregation":"mean"}"#;
     let obj_fn = make_objective_fn(config);
@@ -883,6 +895,7 @@ fn test_tilted_metropolis_partition_valid_grid(
         balance_ub: 0,
         variant: RecomVariant::DistrictPairsRMST,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let final_partition = multi_tilted_runs(
         &graph,
@@ -940,6 +953,7 @@ fn test_backends_agree_on_iowa_election_wins(
         balance_ub: 0,
         variant: RecomVariant::DistrictPairsRMST,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
 
     let obj_fn = make_objective_fn(ELECTION_WINS_CONFIG);
@@ -995,6 +1009,7 @@ fn test_backends_agree_on_virginia_election_wins(
         balance_ub: 0,
         variant: RecomVariant::DistrictPairsRMST,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let config = r#"{"objective":"election_wins","elections":[{"votes_a":"G18DSEN","votes_b":"G18RSEN"}],"target":"a","aggregation":"mean"}"#;
 
@@ -1051,6 +1066,7 @@ fn test_backends_agree_under_metropolis(
         balance_ub: 0,
         variant: RecomVariant::DistrictPairsRMST,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
 
     let obj_fn = make_objective_fn(ELECTION_WINS_CONFIG);
@@ -1106,6 +1122,7 @@ fn test_backends_agree_on_full_score_trajectory() {
         balance_ub: 0,
         variant: RecomVariant::DistrictPairsRMST,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
 
     let obj_fn = make_objective_fn(ELECTION_WINS_CONFIG);
@@ -1166,7 +1183,7 @@ fn test_backends_agree_on_full_score_trajectory() {
 
     // Per-step score (column 1) must match exactly. The full-rescore writer
     // emits no district columns; the incremental writer emits per-district
-    // columns, so we only compare step + score + best_score.
+    // columns, so we only compare step + score.
     for (idx, (full_line, inc_line)) in full_lines.iter().zip(inc_lines.iter()).enumerate() {
         if idx == 0 {
             continue; // header
@@ -1174,8 +1191,8 @@ fn test_backends_agree_on_full_score_trajectory() {
         let full_fields: Vec<&str> = full_line.split(',').collect();
         let inc_fields: Vec<&str> = inc_line.split(',').collect();
         assert_eq!(
-            &full_fields[..3],
-            &inc_fields[..3],
+            &full_fields[..2],
+            &inc_fields[..2],
             "trajectories diverge at line {}: full={} inc={}",
             idx,
             full_line,

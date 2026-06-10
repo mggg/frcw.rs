@@ -178,9 +178,12 @@ mod rmst {
         edges_by_weight: Vec<Edge>,
     }
 
-    /// Samples random spanning trees by sampling random edge weights (with
-    /// weight distributions varying based on edge type) and finding the
-    /// maximum spanning tree.
+    /// Weighted random-MST sampler: samples random edge weights, adds optional
+    /// per-region surcharges (from node attributes) and optional per-edge
+    /// additions (from edge attributes), then finds the minimum spanning tree.
+    ///
+    /// With empty `region_weights` and non-empty `edge_weight_keys` this is a
+    /// plain weighted RMST; with `region_weights` it is the region-aware sampler.
     pub struct RegionAwareSampler {
         /// Buffer for random edge weights.
         weights: Vec<f64>,
@@ -190,6 +193,9 @@ mod rmst {
         edges_by_weight: Vec<Edge>,
         /// Sampler configuration (column -> weight).
         region_weights: Vec<(String, f64)>,
+        /// Per-edge attribute columns whose values are added to edge weights.
+        /// An edge missing a key contributes 0 (the loader stores 0 for it).
+        edge_weight_keys: Vec<String>,
     }
 
     impl RMSTSampler {
@@ -202,13 +208,21 @@ mod rmst {
     }
 
     impl RegionAwareSampler {
-        /// Initializes a random MST sampler for a graph with approximate size `n`.
-        pub fn new(n: usize, region_weights: Vec<(String, f64)>) -> RegionAwareSampler {
+        /// Initializes a weighted random MST sampler for a graph with approximate
+        /// size `n`. `region_weights` are per-region surcharges (may be empty);
+        /// `edge_weight_keys` are per-edge attribute columns added to edge weights
+        /// (may be empty).
+        pub fn new(
+            n: usize,
+            region_weights: Vec<(String, f64)>,
+            edge_weight_keys: Vec<String>,
+        ) -> RegionAwareSampler {
             RegionAwareSampler {
                 weights: Vec::<f64>::with_capacity(8 * n),
                 weights_with_indices: Vec::<(usize, f64)>::with_capacity(8 * n),
                 edges_by_weight: Vec::<Edge>::with_capacity(8 * n),
                 region_weights: region_weights,
+                edge_weight_keys: edge_weight_keys,
             }
         }
     }
@@ -306,6 +320,29 @@ mod rmst {
                 }
             }
 
+            // Add per-edge attribute values. Edge attributes are indexed against
+            // the parent (`attr_source`) edge list, so each subgraph edge is
+            // mapped back to its parent edge index via the `edges_start` scan
+            // (the same lookup used in `USTSampler`).
+            for key in self.edge_weight_keys.iter() {
+                let vals = attr_source
+                    .edge_attr
+                    .get(key)
+                    .unwrap_or_else(|| panic!("Missing edge attribute '{}'", key));
+                for (idx, edge) in graph.edges.iter().enumerate() {
+                    let a = min(attr_indices[edge.0], attr_indices[edge.1]);
+                    let b = max(attr_indices[edge.0], attr_indices[edge.1]);
+                    let mut e = attr_source.edges_start[a];
+                    while attr_source.edges[e].0 == a {
+                        if attr_source.edges[e].1 == b {
+                            self.weights[idx] += vals[e];
+                            break;
+                        }
+                        e += 1;
+                    }
+                }
+            }
+
             self.weights_with_indices.clear();
             for (idx, &weight) in self.weights.iter().enumerate() {
                 self.weights_with_indices.push((idx, weight));
@@ -357,6 +394,116 @@ mod rmst {
             rng: &mut SmallRng,
         ) {
             self.sample_with_attr_source(graph, parent, raw_nodes, buf, rng);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buffers::SpanningTreeBuffer;
+    use rand::SeedableRng;
+    use std::collections::HashMap;
+
+    /// A triangle on nodes 0, 1, 2 with a `barrier` edge attribute parallel to
+    /// `edges` = [(0,1), (0,2), (1,2)].
+    fn triangle(barrier: [f64; 3]) -> Graph {
+        let mut edge_attr = HashMap::new();
+        edge_attr.insert("barrier".to_string(), barrier.to_vec());
+        Graph {
+            edges: vec![Edge(0, 1), Edge(0, 2), Edge(1, 2)],
+            pops: vec![1, 1, 1],
+            neighbors: vec![vec![1, 2], vec![0, 2], vec![0, 1]],
+            edges_start: vec![0, 2, 3],
+            total_pop: 3,
+            attr: HashMap::new(),
+            edge_attr,
+            int_attr: HashMap::new(),
+        }
+    }
+
+    fn tree_has_edge(buf: &SpanningTreeBuffer, u: usize, v: usize) -> bool {
+        buf.st[u].contains(&v)
+    }
+
+    #[test]
+    fn edge_weight_key_forces_high_weight_edge_out_of_tree() {
+        // Edge (1,2) carries an overwhelming weight, so the minimum spanning
+        // tree must never include it (1 and 2 connect via node 0 instead).
+        let graph = triangle([0.0, 0.0, 1e6]);
+        let mut sampler =
+            RegionAwareSampler::new(graph.pops.len(), vec![], vec!["barrier".to_string()]);
+        let mut buf = SpanningTreeBuffer::new(graph.pops.len());
+        for seed in 0..64u64 {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            sampler.random_spanning_tree(&graph, &mut buf, &mut rng);
+            assert!(
+                !tree_has_edge(&buf, 1, 2),
+                "edge (1,2) should be excluded (seed {})",
+                seed
+            );
+            let n_edges: usize = buf.st.iter().map(|a| a.len()).sum::<usize>() / 2;
+            assert_eq!(n_edges, 2, "expected a spanning tree of 2 edges");
+        }
+    }
+
+    #[test]
+    fn without_edge_weight_key_every_edge_can_appear() {
+        // With no edge weight key the three edges are ordered by random base
+        // weights alone, so edge (1,2) should appear in at least one sample.
+        // Guards against the key silently always applying.
+        let graph = triangle([0.0, 0.0, 0.0]);
+        let mut sampler = RegionAwareSampler::new(graph.pops.len(), vec![], vec![]);
+        let mut buf = SpanningTreeBuffer::new(graph.pops.len());
+        let mut seen = false;
+        for seed in 0..64u64 {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            sampler.random_spanning_tree(&graph, &mut buf, &mut rng);
+            if tree_has_edge(&buf, 1, 2) {
+                seen = true;
+                break;
+            }
+        }
+        assert!(seen, "edge (1,2) should sometimes appear without an edge weight key");
+    }
+
+    #[test]
+    fn edge_weight_key_maps_subgraph_edge_to_parent_index() {
+        // Parent: nodes 0,1,2,3 with edges (0,1),(1,2),(1,3),(2,3); barrier on
+        // parent edge (2,3). The subgraph induced by parent nodes {1,2,3} is a
+        // triangle (raw_nodes = [1,2,3]); its local edge (1,2) maps to parent
+        // edge (2,3) and must be excluded. Exercises the subgraph->parent edge
+        // index mapping used by `random_spanning_tree_with_parent`.
+        let mut edge_attr = HashMap::new();
+        edge_attr.insert("barrier".to_string(), vec![0.0, 0.0, 0.0, 1e6]);
+        let parent = Graph {
+            edges: vec![Edge(0, 1), Edge(1, 2), Edge(1, 3), Edge(2, 3)],
+            pops: vec![1, 1, 1, 1],
+            neighbors: vec![vec![1], vec![0, 2, 3], vec![1, 3], vec![1, 2]],
+            edges_start: vec![0, 1, 3, 4],
+            total_pop: 4,
+            attr: HashMap::new(),
+            edge_attr,
+            int_attr: HashMap::new(),
+        };
+        let subgraph = triangle([0.0, 0.0, 0.0]); // subgraph carries no edge attrs in production
+        let raw_nodes = vec![1usize, 2, 3];
+        let mut sampler = RegionAwareSampler::new(3, vec![], vec!["barrier".to_string()]);
+        let mut buf = SpanningTreeBuffer::new(3);
+        for seed in 0..64u64 {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            sampler.random_spanning_tree_with_parent(
+                &subgraph,
+                &parent,
+                &raw_nodes,
+                &mut buf,
+                &mut rng,
+            );
+            assert!(
+                !tree_has_edge(&buf, 1, 2),
+                "subgraph edge (1,2) -> parent (2,3) should be excluded (seed {})",
+                seed
+            );
         }
     }
 }
