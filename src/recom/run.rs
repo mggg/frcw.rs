@@ -306,7 +306,7 @@ pub fn multi_chain(
     };
     let mut progress_count: u64 = 0;
     let mut last_drawn: u64 = 0;
-    let progress_chunk: u64 = (params.num_steps / 1000 as u64 + 1).min(1000);
+    let progress_chunk: u64 = (params.num_steps / 1000).clamp(1, 1000);
 
     // Start job and stats threads.
     let scoped_result = scope(|scope| -> Result<(), String> {

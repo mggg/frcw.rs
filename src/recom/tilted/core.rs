@@ -355,7 +355,7 @@ fn run_tilted_main_loop<B>(
         send_tilted_jobs(job_sends, None, state.current_score);
     }
 
-    let progress_chunk = (params.num_steps / 1000 + 1).min(1000);
+    let progress_chunk = (params.num_steps / 1000).clamp(1, 1000);
     let mut last_drawn = state.step;
     while state.step < effective_steps {
         let (loops, proposals) = collect_tilted_results(result_recv, n_threads);
