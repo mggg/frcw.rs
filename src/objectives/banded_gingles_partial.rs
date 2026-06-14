@@ -57,7 +57,7 @@ impl BandedGinglesPartialState {
                 in_band_count += 1;
             } else if share > upper {
                 above_penalty_sum += upper / share;
-            } else if share > best_below_share || best_below_dist.is_none() {
+            } else if share < lower && (share > best_below_share || best_below_dist.is_none()) {
                 best_below_share = share;
                 best_below_dist = Some(d);
             }
@@ -128,13 +128,21 @@ pub(super) fn full_score(
         .map(|(&m, &t)| m as f64 / t as f64)
         .collect();
     let in_band_count = shares.iter().filter(|&&s| s >= lower && s <= upper).count();
-    let above_penalty: f64 = shares.iter().filter(|&&s| s > upper).map(|&s| upper / s).sum();
+    let above_penalty: f64 = shares
+        .iter()
+        .filter(|&&s| s > upper)
+        .map(|&s| upper / s)
+        .sum();
     let best_below = shares
         .iter()
         .copied()
         .filter(|&s| s < lower)
         .fold(f64::NEG_INFINITY, f64::max);
-    let best_below = if best_below.is_finite() { best_below } else { 0.0 };
+    let best_below = if best_below.is_finite() {
+        best_below
+    } else {
+        0.0
+    };
     in_band_count as f64 + (best_below / lower) + above_penalty
 }
 

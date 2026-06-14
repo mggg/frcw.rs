@@ -43,7 +43,7 @@ impl GinglesPartialState {
             let share = min_pops[d] as f64 / total_pops[d] as f64;
             if share >= threshold {
                 opportunity_count += 1;
-            } else if share > best_below_share || best_below_dist.is_none() {
+            } else if share < threshold && (share > best_below_share || best_below_dist.is_none()) {
                 best_below_share = share;
                 best_below_dist = Some(d);
             }

@@ -1255,11 +1255,19 @@ mod incremental_tests {
         // bvap/100 = [0.1, 0.3, 0.5]; targets [0.05, 0.15, 0.25] (k == num_dists)
         // match order-preservingly: 0.05 + 0.15 + 0.25 = 0.45.
         let mut graph = Graph::from_edge_list("0 1\n1 2", "1 1 1").unwrap();
-        graph
-            .attr
-            .insert("bvap".to_string(), vec!["10", "30", "50"].iter().map(|s| s.to_string()).collect());
+        graph.attr.insert(
+            "bvap".to_string(),
+            vec!["10", "30", "50"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
         let partition = Partition::from_assignments(&graph, &vec![1u32, 2, 3]).unwrap();
-        assert_close(obj.score(&graph, &partition), 0.45, "constant total worked example");
+        assert_close(
+            obj.score(&graph, &partition),
+            0.45,
+            "constant total worked example",
+        );
 
         // Incremental path agrees with the full score after caching.
         obj.cache_graph_cols(&mut graph);
@@ -1283,6 +1291,81 @@ mod incremental_tests {
     #[test]
     fn banded_gingles_partial_incremental_matches_full_score() {
         run_equivalence_suite(test_banded_gingles_config());
+    }
+
+    #[test]
+    fn gingles_partial_zero_total_pop_district_stays_finite() {
+        let mut graph = Graph::from_edge_list("0 1\n1 2", "1 1 1").unwrap();
+        graph.attr.insert(
+            "bvap".to_string(),
+            vec!["0", "30", "60"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
+        graph.attr.insert(
+            "vap".to_string(),
+            vec!["0", "100", "100"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
+        let partition = Partition::from_assignments(&graph, &vec![1u32, 2, 3]).unwrap();
+
+        let obj = ObjectiveConfig::GinglesPartial {
+            threshold: 0.5,
+            min_pop_col: static_str("bvap"),
+            total_pop_col: static_str("vap"),
+        };
+
+        // One opportunity district (0.6) plus the highest below district (0.3);
+        // the NaN district contributes nothing. Score = 1 + 0.3 / 0.5 = 1.6.
+        let full = obj.score(&graph, &partition);
+        assert_close(full, 1.6, "gingles zero-total-pop full");
+
+        let mut cache_graph = graph.clone();
+        obj.cache_graph_cols(&mut cache_graph);
+        let cached = obj.score_partition(&cache_graph, &partition);
+        assert_close(cached, full, "gingles zero-total-pop incremental");
+    }
+
+    #[test]
+    fn banded_gingles_partial_zero_total_pop_district_stays_finite() {
+        // Same NaN-share district as the gingles test, scored against a band.
+        let mut graph = Graph::from_edge_list("0 1\n1 2", "1 1 1").unwrap();
+        graph.attr.insert(
+            "bvap".to_string(),
+            vec!["0", "30", "60"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
+        graph.attr.insert(
+            "vap".to_string(),
+            vec!["0", "100", "100"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
+        let partition = Partition::from_assignments(&graph, &vec![1u32, 2, 3]).unwrap();
+
+        let obj = ObjectiveConfig::BandedGinglesPartial {
+            lower: 0.4,
+            upper: 0.7,
+            min_pop_col: static_str("bvap"),
+            total_pop_col: static_str("vap"),
+        };
+
+        // 0.6 is in-band (+1); 0.3 is the highest below-band district
+        // (+0.3 / 0.4); the NaN district contributes nothing.
+        let expected = 1.0 + 0.3 / 0.4;
+        let full = obj.score(&graph, &partition);
+        assert_close(full, expected, "banded zero-total-pop full");
+
+        let mut cache_graph = graph.clone();
+        obj.cache_graph_cols(&mut cache_graph);
+        let cached = obj.score_partition(&cache_graph, &partition);
+        assert_close(cached, full, "banded zero-total-pop incremental");
     }
 
     #[test]
