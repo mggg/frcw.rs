@@ -101,9 +101,9 @@ pub struct BenWriter {
     writer: Option<BenStreamWriter<Box<dyn Write + Send>>>,
     /// Output stream, held until `init` wraps it in the encoder.
     output: Option<Box<dyn Write + Send>>,
-    /// The plan whose frame is buffered, held as 1-indexed labels. Its repeat
-    /// count is only known once the chain moves off it (the next `step`) or the
-    /// chain ends (`close`).
+    /// The plan whose frame is buffered, held as the `u16` labels BEN packs. Its
+    /// repeat count is only known once the chain moves off it (the next `step`)
+    /// or the chain ends (`close`).
     pending_assignment: Vec<u16>,
     /// Self-loop count accumulated at the final plan after the last
     /// accepted step, reported via [`StatsWriter::self_loop`] and folded
@@ -158,18 +158,20 @@ impl AssignmentsOnlyWriter {
     /// vector of the form
     /// [2, 2, 2, 2, 3, 0, 0, 0, 3, 3, 1, 1, 3, 1, 1, 1]
     /// the values are reassigned by order of appearance
-    /// indexed by 1, so the previous vector would become
-    /// [1, 1, 1, 1, 2, 3, 3, 3, 2, 2, 4, 4, 2, 4, 4, 4]
+    /// indexed by 0, so the previous vector would become
+    /// [0, 0, 0, 0, 1, 2, 2, 2, 1, 1, 3, 3, 1, 3, 3, 3]
     fn canonicalize_assignments(&self, partition: &Partition) -> Vec<u32> {
         let mut canon = partition.assignments.clone();
-        let mut dist_mapping = vec![0; partition.num_dists as usize];
-        let mut cur_dist = 1;
+        // `None` distinguishes an unseen district from label 0.
+        let mut dist_mapping: Vec<Option<u32>> = vec![None; partition.num_dists as usize];
+        let mut cur_dist = 0;
         for (idx, &assn) in partition.assignments.iter().enumerate() {
-            if dist_mapping[assn as usize] == 0 {
-                dist_mapping[assn as usize] = cur_dist;
+            let label = *dist_mapping[assn as usize].get_or_insert_with(|| {
+                let next = cur_dist;
                 cur_dist += 1;
-            }
-            canon[idx] = dist_mapping[assn as usize];
+                next
+            });
+            canon[idx] = label;
         }
         canon
     }
@@ -474,12 +476,7 @@ impl StatsWriter for AssignmentsOnlyWriter {
 
 impl StatsWriter for CanonicalWriter {
     fn init(&mut self, _graph: &Graph, partition: &Partition) -> Result<()> {
-        self.previous_assignment = partition
-            .assignments
-            .clone()
-            .iter()
-            .map(|x| x + 1)
-            .collect();
+        self.previous_assignment = partition.assignments.clone();
         self.output
             .write_all(
                 format!(
@@ -518,12 +515,7 @@ impl StatsWriter for CanonicalWriter {
                 )
                 .expect("Failed to write to output");
         }
-        self.previous_assignment = partition
-            .assignments
-            .clone()
-            .iter()
-            .map(|x| x + 1)
-            .collect();
+        self.previous_assignment = partition.assignments.clone();
         self.output
             .write_all(
                 format!(

@@ -573,7 +573,7 @@ fn test_tilted_canonical_writer_flushes_terminal_self_loops() {
     let final_assignment = final_partition
         .assignments
         .iter()
-        .map(|assignment| Value::from(*assignment + 1))
+        .map(|assignment| Value::from(*assignment))
         .collect::<Vec<_>>();
     assert_eq!(
         records.last().unwrap()["assignment"].as_array().unwrap(),
