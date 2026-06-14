@@ -399,7 +399,10 @@ fn election_single_update(
             }
         }
         _ => {
-            // Slow path: rescan unchanged districts.
+            // Slow path: rescan the unchanged districts, then fold in a and b.
+            // The inner `>=` (not `>`) lets a valid loser that ties the scanned
+            // max claim the holder when none was found yet (e.g. all-zero
+            // tiebreaks from zero-target districts).
             let (mut dist, mut tb) =
                 scan_best_losing_tiebreak(state_target, state_other, a_label, b_label);
             if new_a_loss_tb > tb || (dist.is_none() && new_a_tb_opt.is_some()) {

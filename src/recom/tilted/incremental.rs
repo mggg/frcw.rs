@@ -5,7 +5,7 @@
 //! `score_proposal` without mutating the partition. Accepting a proposal
 //! updates both the partition (`update_with_dist_adj`, which keeps `dist_adj`
 //! warm for cut-edge sampling) and the objective state in lockstep. Cost per
-//! candidate scales with the boundary of the affected districts rather than
+//! candidate scales with the size of the two affected districts rather than
 //! the full partition.
 
 use super::super::RecomProposal;
