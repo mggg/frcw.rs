@@ -52,7 +52,8 @@ fn disconnected_districts(graph: &Graph, partition: &Partition) -> Vec<(usize, u
 /// * `pop_col` - The column in the graph JSON corresponding to total node
 ///    population. This column should be integer-valued.
 /// * `assignment_col` - A column in the graph JSON corresponding to a
-///    a seed partition. This column should be integer-valued and 1-indexed.
+///    a seed partition. This column should be integer-valued with consecutive
+///    labels, either 0- or 1-indexed.
 /// * `columns` - Node metadata columns that must exist on every node. Missing
 ///    keys panic -- use this for columns a typo in whose name should be caught
 ///    at load time.
