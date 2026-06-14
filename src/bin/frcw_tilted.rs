@@ -564,7 +564,7 @@ fn main() {
         "graph_json": graph_json,
     });
     // Emit only the parameter relevant to the active acceptance rule.
-    match accept_rule_str.as_str() {
+    match accept_rule_str {
         "fixed" => {
             if let Some(prob) = accept_worse_prob {
                 meta.as_object_mut()
