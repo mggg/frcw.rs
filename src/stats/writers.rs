@@ -4,6 +4,8 @@ use crate::recom::RecomProposal;
 #[cfg(feature = "linalg")]
 use crate::stats::subgraph_spanning_tree_count;
 use crate::stats::{partition_sums, proposal_sums, SelfLoopCounts, SelfLoopReason};
+use binary_ensemble::io::writer::BenStreamWriter;
+use binary_ensemble::BenVariant;
 use pcompress::diff::Diff;
 use pcompress::encode::export_diff;
 use serde_json::{json, to_value, Value};
@@ -94,8 +96,15 @@ pub struct CanonicalWriter {
 }
 
 pub struct BenWriter {
-    previous_assignment: Vec<u32>,
-    output: Box<dyn Write + Send>,
+    /// Streaming TwoDelta encoder. `None` until [`StatsWriter::init`] builds it
+    /// (which emits the banner); [`StatsWriter::close`] finalizes it.
+    writer: Option<BenStreamWriter<Box<dyn Write + Send>>>,
+    /// Output stream, held until `init` wraps it in the encoder.
+    output: Option<Box<dyn Write + Send>>,
+    /// The plan whose frame is buffered, held as 1-indexed labels. Its repeat
+    /// count is only known once the chain moves off it (the next `step`) or the
+    /// chain ends (`close`).
+    pending_assignment: Vec<u16>,
     /// Self-loop count accumulated at the final plan after the last
     /// accepted step, reported via [`StatsWriter::self_loop`] and folded
     /// into the final segment's count by [`StatsWriter::close`].
@@ -191,8 +200,9 @@ impl CanonicalWriter {
 impl BenWriter {
     pub fn new(output: Box<dyn Write + Send>) -> BenWriter {
         BenWriter {
-            previous_assignment: Vec::new(),
-            output: output,
+            writer: None,
+            output: Some(output),
+            pending_assignment: Vec::new(),
             trailing_self_loops: 0,
         }
     }
@@ -561,26 +571,10 @@ impl StatsWriter for CanonicalWriter {
 
 impl StatsWriter for BenWriter {
     fn init(&mut self, _graph: &Graph, partition: &Partition) -> Result<()> {
-        self.previous_assignment = partition
-            .assignments
-            .clone()
-            .iter()
-            .map(|x| x + 1)
-            .collect();
-        self.output
-            .write_all(b"MKVCHAIN BEN FILE")
-            .expect("Failed to write to output");
-        self.output
-            .write_all(
-                ben::encode::encode_ben_vec_from_assign(
-                    (&self.previous_assignment)
-                        .iter()
-                        .map(|&x| x as u16)
-                        .collect(),
-                )
-                .as_slice(),
-            )
-            .expect("Failed to write to output");
+        let output = self.output.take().expect("BenWriter output already taken");
+        // `for_ben` emits the TWODELTA banner immediately.
+        self.writer = Some(BenStreamWriter::for_ben(output, BenVariant::TwoDelta)?);
+        self.pending_assignment = partition.assignments.iter().map(|&x| x as u16).collect();
         Ok(())
     }
 
@@ -592,24 +586,15 @@ impl StatsWriter for BenWriter {
         _proposal: &RecomProposal,
         counts: &SelfLoopCounts,
     ) -> Result<()> {
-        // The first step plus the number of self loops
-        let tot_count = counts.sum() + 1;
-        self.output.write_all(&(tot_count as u16).to_be_bytes())?;
-        self.previous_assignment = partition
-            .assignments
-            .clone()
-            .iter()
-            .map(|x| x + 1)
-            .collect();
-        let new_vec = ben::encode::encode_ben_vec_from_assign(
-            (&self.previous_assignment)
-                .iter()
-                .map(|&x| x as u16)
-                .collect(),
-        );
-        self.output
-            .write_all(new_vec.as_slice())
-            .expect("Failed to write to output");
+        // We have now left the pending plan, so the count is known: the
+        // self-loops spent there plus 1 for the step to the new plan.
+        let count = (counts.sum() + 1) as u16;
+        let pending = std::mem::take(&mut self.pending_assignment);
+        self.writer
+            .as_mut()
+            .expect("BenWriter stepped before init")
+            .write_frame(pending, count)?;
+        self.pending_assignment = partition.assignments.iter().map(|&x| x as u16).collect();
         Ok(())
     }
 
@@ -635,7 +620,10 @@ impl StatsWriter for BenWriter {
         // Without this fix, chains that end on a rejection are encoded
         // shorter than chains of equal `num_steps` that end on an accept.
         let final_count = self.trailing_self_loops.saturating_add(1) as u16;
-        self.output.write_all(&final_count.to_be_bytes())?;
+        let pending = std::mem::take(&mut self.pending_assignment);
+        let writer = self.writer.as_mut().expect("BenWriter closed before init");
+        writer.write_frame(pending, final_count)?;
+        writer.finish()?;
         Ok(())
     }
 }
