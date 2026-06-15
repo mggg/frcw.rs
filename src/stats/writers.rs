@@ -4,12 +4,17 @@ use crate::recom::RecomProposal;
 #[cfg(feature = "linalg")]
 use crate::stats::subgraph_spanning_tree_count;
 use crate::stats::{partition_sums, proposal_sums, SelfLoopCounts, SelfLoopReason};
+use binary_ensemble::io::bundle::format::{AssignmentFormat, KnownAssetKind};
+use binary_ensemble::io::bundle::{
+    AddAssetOptions, BendlStreamSession, BendlWriteError, BendlWriter,
+};
 use binary_ensemble::io::writer::BenStreamWriter;
 use binary_ensemble::BenVariant;
 use pcompress::diff::Diff;
 use pcompress::encode::export_diff;
 use serde_json::{json, to_value, Value};
-use std::io::{BufWriter, Result, Write};
+use std::fs::File;
+use std::io::{self, BufWriter, Result, Write};
 
 /// A standard interface for writing steps and statistics to stdout.
 /// TODO: allow direct output to a file (e.g. in Parquet format).
@@ -95,20 +100,127 @@ pub struct CanonicalWriter {
     output: Box<dyn Write + Send>,
 }
 
+/// Shared TwoDelta frame bookkeeping for the `ben` and `bendl` writers.
+///
+/// Holds the single buffered plan whose repeat count is not yet known and the
+/// trailing self-loop tally at the final plan, and accumulates the true total
+/// sample count. Both writers delegate their frame emission here so the count
+/// logic (including the `u16`-overflow split below) lives in one place.
+struct TwoDeltaFrameBuffer {
+    /// The plan whose frame is buffered, held as the `u16` labels BEN packs. Its
+    /// repeat count is only known once the chain moves off it (the next `step`)
+    /// or the chain ends (the final flush).
+    pending_assignment: Vec<u16>,
+    /// Self-loop count accumulated at the final plan after the last accepted
+    /// step, folded into the final segment's count by the final flush.
+    trailing_self_loops: u64,
+    /// Running sum of every emitted frame count: the true total sample count,
+    /// stamped into the BENDL header so readers can trust it.
+    total_samples: u64,
+}
+
+impl TwoDeltaFrameBuffer {
+    fn new() -> TwoDeltaFrameBuffer {
+        TwoDeltaFrameBuffer {
+            pending_assignment: Vec::new(),
+            trailing_self_loops: 0,
+            total_samples: 0,
+        }
+    }
+
+    /// Buffer the initial plan (from `init`); its count is filled later.
+    fn set_initial(&mut self, assignment: Vec<u16>) {
+        self.pending_assignment = assignment;
+    }
+
+    /// The chain left the pending plan via an accepted step: emit the pending
+    /// plan with count `self_loops + 1` (the rejections spent there plus the
+    /// move to `next`), then buffer `next`.
+    fn push_step<W: Write>(
+        &mut self,
+        writer: &mut BenStreamWriter<W>,
+        next_assignment: Vec<u16>,
+        self_loops: u64,
+    ) -> Result<()> {
+        let count = self_loops + 1;
+        let pending_assignment = std::mem::replace(&mut self.pending_assignment, next_assignment);
+        self.write_counted(writer, pending_assignment, count)
+    }
+
+    /// Accumulate trailing self-loops sampled at the final plan.
+    fn add_self_loops(&mut self, count: u64) {
+        self.trailing_self_loops += count;
+    }
+
+    /// Emit the final pending plan with count `trailing_self_loops + 1` (the
+    /// trailing rejections plus the arriving step counted at this plan; mirrors
+    /// the `+ 1` in `push_step`).
+    fn flush_final<W: Write>(&mut self, writer: &mut BenStreamWriter<W>) -> Result<()> {
+        let count = self.trailing_self_loops + 1;
+        let pending_assignment = std::mem::take(&mut self.pending_assignment);
+        self.write_counted(writer, pending_assignment, count)
+    }
+
+    /// Write `assignment` with repeat `count`, splitting counts above
+    /// `u16::MAX` into repeated same-assignment frames. A second `write_frame`
+    /// with an unchanged assignment encodes a TwoDelta `Repeat`, and the chunk
+    /// sum is preserved, so the decoded length still matches `total_samples`.
+    /// Silent `as u16` truncation is forbidden: it would make the BENDL header
+    /// `sample_count` disagree with the decodable stream length.
+    fn write_counted<W: Write>(
+        &mut self,
+        writer: &mut BenStreamWriter<W>,
+        assignment: Vec<u16>,
+        count: u64,
+    ) -> Result<()> {
+        debug_assert!(count > 0, "frame count must be positive");
+        const MAX_FRAME_COUNT: u64 = u16::MAX as u64;
+        let mut remaining = count;
+        // `write_frame` consumes the assignment Vec, so clone for every chunk
+        // except the last.
+        while remaining > MAX_FRAME_COUNT {
+            writer.write_frame(assignment.clone(), u16::MAX)?;
+            remaining -= MAX_FRAME_COUNT;
+        }
+        writer.write_frame(assignment, remaining as u16)?;
+        self.total_samples += count;
+        Ok(())
+    }
+}
+
 pub struct BenWriter {
     /// Streaming TwoDelta encoder. `None` until [`StatsWriter::init`] builds it
     /// (which emits the banner); [`StatsWriter::close`] finalizes it.
-    writer: Option<BenStreamWriter<Box<dyn Write + Send>>>,
-    /// Output stream, held until `init` wraps it in the encoder.
-    output: Option<Box<dyn Write + Send>>,
-    /// The plan whose frame is buffered, held as the `u16` labels BEN packs. Its
-    /// repeat count is only known once the chain moves off it (the next `step`)
-    /// or the chain ends (`close`).
-    pending_assignment: Vec<u16>,
-    /// Self-loop count accumulated at the final plan after the last
-    /// accepted step, reported via [`StatsWriter::self_loop`] and folded
-    /// into the final segment's count by [`StatsWriter::close`].
-    trailing_self_loops: u64,
+    stream: Option<BenStreamWriter<Box<dyn Write + Send>>>,
+    /// Output sink, held until `init` wraps it in the `stream` encoder.
+    pending_output: Option<Box<dyn Write + Send>>,
+    /// Shared TwoDelta frame bookkeeping.
+    frames: TwoDeltaFrameBuffer,
+}
+
+/// Maps a [`BendlWriteError`] into the [`io::Error`] the [`StatsWriter`] trait
+/// requires.
+fn bendl_to_io(error: BendlWriteError) -> io::Error {
+    io::Error::new(io::ErrorKind::Other, error)
+}
+
+/// Writes a self-describing `.bendl` file: the dual graph and run metadata as
+/// front-loaded assets, plus the same TwoDelta BEN stream the `ben` writer
+/// produces. BENDL needs a seekable sink, so this writer owns a concrete
+/// `BufWriter<File>` rather than the boxed `output_buffer` other writers use.
+pub struct BendlBenStreamWriter {
+    /// Buffered output file, taken when `init` opens the bundle writer.
+    pending_file: Option<BufWriter<File>>,
+    /// The dual-graph JSON bytes embedded as the Graph asset (reordered if the
+    /// caller requested an ordering).
+    graph_bytes: Vec<u8>,
+    /// The run-metadata JSON bytes embedded as the Metadata asset.
+    metadata_bytes: Vec<u8>,
+    /// Streaming TwoDelta encoder over the bundle's stream session; `None` until
+    /// `init` builds it.
+    stream: Option<BenStreamWriter<BendlStreamSession<BufWriter<File>>>>,
+    /// Shared TwoDelta frame bookkeeping.
+    frames: TwoDeltaFrameBuffer,
 }
 
 /// Writes assignments in Max Fan's `pcompress` binary format.
@@ -202,10 +314,27 @@ impl CanonicalWriter {
 impl BenWriter {
     pub fn new(output: Box<dyn Write + Send>) -> BenWriter {
         BenWriter {
-            writer: None,
-            output: Some(output),
-            pending_assignment: Vec::new(),
-            trailing_self_loops: 0,
+            stream: None,
+            pending_output: Some(output),
+            frames: TwoDeltaFrameBuffer::new(),
+        }
+    }
+}
+
+impl BendlBenStreamWriter {
+    /// `output` is the already-wrapped buffered output file; `graph_bytes` and
+    /// `metadata_bytes` are the Graph and Metadata asset payloads to embed.
+    pub fn new(
+        output: BufWriter<File>,
+        graph_bytes: Vec<u8>,
+        metadata_bytes: Vec<u8>,
+    ) -> BendlBenStreamWriter {
+        BendlBenStreamWriter {
+            pending_file: Some(output),
+            graph_bytes,
+            metadata_bytes,
+            stream: None,
+            frames: TwoDeltaFrameBuffer::new(),
         }
     }
 }
@@ -563,10 +692,14 @@ impl StatsWriter for CanonicalWriter {
 
 impl StatsWriter for BenWriter {
     fn init(&mut self, _graph: &Graph, partition: &Partition) -> Result<()> {
-        let output = self.output.take().expect("BenWriter output already taken");
+        let output = self
+            .pending_output
+            .take()
+            .expect("BenWriter output already taken");
         // `for_ben` emits the TWODELTA banner immediately.
-        self.writer = Some(BenStreamWriter::for_ben(output, BenVariant::TwoDelta)?);
-        self.pending_assignment = partition.assignments.iter().map(|&x| x as u16).collect();
+        self.stream = Some(BenStreamWriter::for_ben(output, BenVariant::TwoDelta)?);
+        self.frames
+            .set_initial(partition.assignments.iter().map(|&x| x as u16).collect());
         Ok(())
     }
 
@@ -578,16 +711,9 @@ impl StatsWriter for BenWriter {
         _proposal: &RecomProposal,
         counts: &SelfLoopCounts,
     ) -> Result<()> {
-        // We have now left the pending plan, so the count is known: the
-        // self-loops spent there plus 1 for the step to the new plan.
-        let count = (counts.sum() + 1) as u16;
-        let pending = std::mem::take(&mut self.pending_assignment);
-        self.writer
-            .as_mut()
-            .expect("BenWriter stepped before init")
-            .write_frame(pending, count)?;
-        self.pending_assignment = partition.assignments.iter().map(|&x| x as u16).collect();
-        Ok(())
+        let next_assignment = partition.assignments.iter().map(|&x| x as u16).collect();
+        let stream = self.stream.as_mut().expect("BenWriter stepped before init");
+        self.frames.push_step(stream, next_assignment, counts.sum() as u64)
     }
 
     fn self_loop(
@@ -597,25 +723,99 @@ impl StatsWriter for BenWriter {
         _partition: &Partition,
         counts: &SelfLoopCounts,
     ) -> Result<()> {
-        // Trailing rejections occur at the final plan and must be folded
-        // into its segment count by `close`. The runner emits one
-        // `self_loop` call per pending self-loop batch; accumulate
-        // defensively in case there are several.
-        self.trailing_self_loops += counts.sum() as u64;
+        // Trailing rejections occur at the final plan and are folded into its
+        // segment count by `close`. The runner emits one `self_loop` call per
+        // pending batch; accumulate in case there are several.
+        self.frames.add_self_loops(counts.sum() as u64);
         Ok(())
     }
 
     fn close(&mut self) -> Result<()> {
-        // The final segment's count is the number of trailing rejections
-        // at the last plan, plus 1 for the arriving-accept step counted
-        // at the new plan (mirrors how `step` writes `counts.sum() + 1`).
-        // Without this fix, chains that end on a rejection are encoded
-        // shorter than chains of equal `num_steps` that end on an accept.
-        let final_count = self.trailing_self_loops.saturating_add(1) as u16;
-        let pending = std::mem::take(&mut self.pending_assignment);
-        let writer = self.writer.as_mut().expect("BenWriter closed before init");
-        writer.write_frame(pending, final_count)?;
-        writer.finish()?;
+        let stream = self.stream.as_mut().expect("BenWriter closed before init");
+        self.frames.flush_final(stream)?;
+        stream.finish()?;
+        Ok(())
+    }
+}
+
+impl StatsWriter for BendlBenStreamWriter {
+    fn init(&mut self, _graph: &Graph, partition: &Partition) -> Result<()> {
+        let output = self
+            .pending_file
+            .take()
+            .expect("BendlBenStreamWriter output already taken");
+        let mut bundle = BendlWriter::new(output, AssignmentFormat::Ben)?;
+        // Graph and Metadata are the only assets: the embedded (possibly
+        // reordered) graph is self-consistent with the positional stream, so no
+        // NodePermutationMap is needed.
+        bundle
+            .add_known_asset(
+                KnownAssetKind::Graph,
+                &self.graph_bytes,
+                AddAssetOptions::defaults().json(),
+            )
+            .map_err(bendl_to_io)?;
+        bundle
+            .add_known_asset(
+                KnownAssetKind::Metadata,
+                &self.metadata_bytes,
+                AddAssetOptions::defaults().json(),
+            )
+            .map_err(bendl_to_io)?;
+        let session = bundle.into_stream_session().map_err(bendl_to_io)?;
+        // `for_ben` emits the TWODELTA banner into the stream session.
+        self.stream = Some(BenStreamWriter::for_ben(session, BenVariant::TwoDelta)?);
+        self.frames
+            .set_initial(partition.assignments.iter().map(|&x| x as u16).collect());
+        Ok(())
+    }
+
+    fn step(
+        &mut self,
+        _step: u64,
+        _graph: &Graph,
+        partition: &Partition,
+        _proposal: &RecomProposal,
+        counts: &SelfLoopCounts,
+    ) -> Result<()> {
+        let next_assignment = partition.assignments.iter().map(|&x| x as u16).collect();
+        let stream = self
+            .stream
+            .as_mut()
+            .expect("BendlBenStreamWriter stepped before init");
+        self.frames
+            .push_step(stream, next_assignment, counts.sum() as u64)
+    }
+
+    fn self_loop(
+        &mut self,
+        _step: u64,
+        _graph: &Graph,
+        _partition: &Partition,
+        counts: &SelfLoopCounts,
+    ) -> Result<()> {
+        self.frames.add_self_loops(counts.sum() as u64);
+        Ok(())
+    }
+
+    fn close(&mut self) -> Result<()> {
+        let mut stream = self
+            .stream
+            .take()
+            .expect("BendlBenStreamWriter closed before init");
+        self.frames.flush_final(&mut stream)?;
+        let total_samples = self.frames.total_samples;
+        // `finish_into_inner` flushes any pending BEN frame; `finish_into_writer`
+        // stamps the true total into the header before `finish` writes the directory.
+        let session = stream.finish_into_inner()?;
+        let sample_count = i64::try_from(total_samples).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                "BENDL sample count exceeds the i64 header field",
+            )
+        })?;
+        let bundle = session.finish_into_writer(sample_count);
+        bundle.finish().map_err(bendl_to_io)?;
         Ok(())
     }
 }

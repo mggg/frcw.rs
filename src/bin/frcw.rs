@@ -4,16 +4,19 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 use clap::{value_parser, Arg, ArgAction, Command};
+use frcw::bendl::{reorder_graph_json, BendlGraphOrder};
 use frcw::config::parse_region_weights_config;
-use frcw::init::from_networkx;
+use frcw::init::{from_networkx, from_networkx_value};
 use frcw::recom::run::multi_chain;
 use frcw::recom::{RecomParams, RecomVariant};
 use frcw::stats::{
-    AssignmentsOnlyWriter, BenWriter, CanonicalWriter, JSONLWriter, PcompressWriter, StatsWriter,
-    TSVWriter,
+    AssignmentsOnlyWriter, BenWriter, BendlBenStreamWriter, CanonicalWriter, JSONLWriter,
+    PcompressWriter, StatsWriter, TSVWriter,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use sha3::{Digest, Sha3_256};
+use std::fs::OpenOptions;
+use std::io::BufWriter;
 use std::path::PathBuf;
 use std::{fs, io};
 
@@ -28,6 +31,30 @@ fn output_buffer(path: &str, overwrite_output: bool) -> Box<dyn io::Write + Send
         OUTPUT_BUFFER_CAPACITY,
         fs::File::create(path).unwrap(),
     ))
+}
+
+/// SHA3-256 hex digest of `bytes`, matching the file-hash provenance format.
+fn sha3_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha3_256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+/// Open a concrete seekable output file for the `bendl` writer, enforcing the
+/// same overwrite guard as [`output_buffer`]. BENDL patches its header and
+/// directory by seeking, so it cannot use the boxed (stdout-capable) sink.
+fn bendl_output_file(path: &str, overwrite_output: bool) -> BufWriter<fs::File> {
+    let p = std::path::Path::new(path);
+    if p.exists() && !overwrite_output {
+        panic!("Output file already exists. Use --overwrite-output to replace it.");
+    }
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(p)
+        .unwrap_or_else(|e| panic!("Could not open output file {}: {}", path, e));
+    BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, file)
 }
 
 fn main() {
@@ -144,7 +171,9 @@ fn main() {
                     \tcanonical: Standardized JSONL output with assignment vector and sample\n\
                         \t\tnumber\n\
                     \tben: Compressed binary format for post-processing with BEN (recommended for \
-                        storing ensembles).",
+                        storing ensembles).\n\
+                    \tbendl: Self-describing BENDL file (graph + metadata + BEN stream in one \
+                        file). Requires --output-file.",
                     ),
             ) // other options: jsonl-full, tsv
             .arg(
@@ -198,6 +227,20 @@ fn main() {
                     .long("show-progress")
                     .action(ArgAction::SetTrue)
                     .help("Whether to show a progress bar during execution."),
+            )
+            .arg(
+                Arg::new("bendl_graph_order")
+                    .long("bendl-graph-order")
+                    .value_parser(value_parser!(String))
+                    .default_value("none")
+                    .help(
+                        "Graph reordering applied before the chain runs, for better BENDL stream \
+                        compression. Only valid with '--writer bendl'.\n\
+                        \tnone (default): embed the graph as-is\n\
+                        \trcm: Reverse Cuthill-McKee ordering\n\
+                        \tmlc: multilevel-cluster ordering\n\
+                        \tkey:<attr>: sort nodes by node attribute <attr> (must be on every node)",
+                    ),
             );
 
     if cfg!(feature = "linalg") {
@@ -322,35 +365,27 @@ fn main() {
         bad => panic!("Parameter error: invalid variant '{}'", bad),
     };
 
-    let output_buffer: Box<dyn io::Write + Send> = match matches.get_one::<String>("output-file") {
-        Some(path) => output_buffer(path, overwrite_output),
-        None => Box::new(io::BufWriter::with_capacity(
-            OUTPUT_BUFFER_CAPACITY,
-            std::io::stdout(),
-        )),
-    };
+    // BENDL needs a seekable file and embeds a possibly-reordered graph, so its
+    // arm diverges from the boxed-output path. Validate its flags before doing
+    // any work or opening the output file.
+    let is_bendl = writer_str == "bendl";
+    let bendl_order = BendlGraphOrder::parse(
+        matches
+            .get_one::<String>("bendl_graph_order")
+            .expect("bendl_graph_order has a default value"),
+    )
+    .unwrap_or_else(|e| panic!("Parameter error: {}", e));
+    let output_file = matches.get_one::<String>("output-file").cloned();
+    if !bendl_order.is_none() && !is_bendl {
+        panic!("Parameter error: '--bendl-graph-order' is only valid with '--writer bendl'.");
+    }
+    if is_bendl && output_file.is_none() {
+        panic!(
+            "Parameter error: '--writer bendl' requires '--output-file' \
+             (BENDL needs a seekable file and cannot stream to stdout)."
+        );
+    }
 
-    let writer: Box<dyn StatsWriter> = match writer_str {
-        "tsv" => Box::new(TSVWriter::new(output_buffer)),
-        "jsonl" => Box::new(JSONLWriter::new(
-            false,
-            st_counts,
-            cut_edges_count,
-            output_buffer,
-        )),
-        "pcompress" => Box::new(PcompressWriter::new(output_buffer)),
-        "jsonl-full" => Box::new(JSONLWriter::new(
-            true,
-            st_counts,
-            cut_edges_count,
-            output_buffer,
-        )),
-        "assignments" => Box::new(AssignmentsOnlyWriter::new(false, output_buffer)),
-        "canonicalized-assignments" => Box::new(AssignmentsOnlyWriter::new(true, output_buffer)),
-        "canonical" => Box::new(CanonicalWriter::new(output_buffer)),
-        "ben" => Box::new(BenWriter::new(output_buffer)),
-        bad => panic!("Parameter error: invalid writer '{}'", bad),
-    };
     if variant == RecomVariant::Reversible && balance_ub == 0 {
         panic!("For reversible ReCom, specify M > 0.");
     }
@@ -369,20 +404,65 @@ fn main() {
         }
     }
 
-    let (graph, partition) = from_networkx(
-        &graph_json,
-        pop_col,
-        assignment_col,
-        sum_cols,
-        vec![],
-        edge_weight_keys.clone(),
-    )
+    // Load the graph and partition and compute graph provenance. The bendl arm
+    // reorders the JSON in memory and builds the chain from the exact bytes it
+    // will embed, so the run and the embedded Graph asset can never diverge.
+    let (graph, partition, embed_bytes, source_graph_sha3, embedded_graph_sha3) = if is_bendl {
+        let source_bytes = fs::read(&graph_json)
+            .unwrap_or_else(|e| panic!("Could not read graph file {}: {}", graph_json, e));
+        let source_sha3 = sha3_hex(&source_bytes);
+        let embed_bytes = reorder_graph_json(&source_bytes, &bendl_order)
+            .unwrap_or_else(|e| panic!("Could not reorder graph for BENDL: {}", e));
+        let embedded_sha3 = sha3_hex(&embed_bytes);
+        let data: Value = serde_json::from_slice(&embed_bytes)
+            .unwrap_or_else(|e| panic!("Could not parse reordered graph JSON: {}", e));
+        let (graph, partition) = from_networkx_value(
+            data,
+            pop_col,
+            assignment_col,
+            sum_cols,
+            vec![],
+            edge_weight_keys.clone(),
+        )
         .unwrap_or_else(|e| {
             panic!(
                 "Could not load graph and partition from {}: {}",
                 graph_json, e
             )
         });
+        (
+            graph,
+            partition,
+            Some(embed_bytes),
+            source_sha3,
+            Some(embedded_sha3),
+        )
+    } else {
+        let (graph, partition) = from_networkx(
+            &graph_json,
+            pop_col,
+            assignment_col,
+            sum_cols,
+            vec![],
+            edge_weight_keys.clone(),
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "Could not load graph and partition from {}: {}",
+                graph_json, e
+            )
+        });
+        let mut graph_file = fs::File::open(&graph_json).unwrap();
+        let mut graph_hasher = Sha3_256::new();
+        io::copy(&mut graph_file, &mut graph_hasher).unwrap();
+        (
+            graph,
+            partition,
+            None,
+            format!("{:x}", graph_hasher.finalize()),
+            None,
+        )
+    };
 
     let target_pop = match target_pop_opt {
         Some(p) => p as f64,
@@ -403,16 +483,12 @@ fn main() {
         edge_weight_keys: edge_weight_keys,
     };
 
-    let mut graph_file = fs::File::open(&graph_json).unwrap();
-    let mut graph_hasher = Sha3_256::new();
-    io::copy(&mut graph_file, &mut graph_hasher).unwrap();
-    let graph_hash = format!("{:x}", graph_hasher.finalize());
     let mut meta = json!({
         "assignment_col": assignment_col,
         "tol": tol,
         "pop_col": pop_col,
         "graph_path": graph_json,
-        "graph_sha3": graph_hash,
+        "graph_sha3": source_graph_sha3,
         "batch_size": batch_size,
         "rng_seed": rng_seed,
         "num_threads": n_threads,
@@ -421,7 +497,7 @@ fn main() {
         "graph_json": graph_json,
         "chain_variant": variant_str,
     });
-    if let Some(path) = matches.get_one::<String>("output-file") {
+    if let Some(path) = &output_file {
         meta.as_object_mut()
             .unwrap()
             .insert("output_file".to_string(), json!(path));
@@ -439,11 +515,71 @@ fn main() {
             .unwrap()
             .insert("region_weights".to_string(), json!(region_weights));
     }
+    // For BENDL the original-file hash no longer verifies the (possibly
+    // reordered) embedded asset, so replace `graph_sha3` with explicit
+    // source/embedded provenance plus the ordering applied. When order=none the
+    // two hashes are equal.
+    if is_bendl {
+        let meta_object = meta.as_object_mut().unwrap();
+        meta_object.remove("graph_sha3");
+        meta_object.insert("source_graph_sha3".to_string(), json!(source_graph_sha3));
+        meta_object.insert(
+            "embedded_graph_sha3".to_string(),
+            json!(embedded_graph_sha3
+                .clone()
+                .expect("bendl computes the embedded hash")),
+        );
+        meta_object.insert("bendl_graph_order".to_string(), json!(bendl_order.label()));
+    }
     if writer_str == "jsonl" || writer_str == "jsonl-full" {
         // hotfix for pcompress writing
         // TODO: move this into init
         println!("{}", json!({ "meta": meta }).to_string());
     }
+
+    // Build the output writer. The bendl arm embeds the provenance-enriched
+    // metadata and writes to a concrete seekable file; all others use the boxed
+    // sink (file or stdout).
+    let writer: Box<dyn StatsWriter> = if is_bendl {
+        let path = output_file.as_ref().expect("bendl requires --output-file");
+        let bundle_file = bendl_output_file(path, overwrite_output);
+        Box::new(BendlBenStreamWriter::new(
+            bundle_file,
+            embed_bytes.expect("bendl computes the embed bytes"),
+            meta.to_string().into_bytes(),
+        ))
+    } else {
+        let output_buffer: Box<dyn io::Write + Send> = match &output_file {
+            Some(path) => output_buffer(path, overwrite_output),
+            None => Box::new(io::BufWriter::with_capacity(
+                OUTPUT_BUFFER_CAPACITY,
+                std::io::stdout(),
+            )),
+        };
+        match writer_str {
+            "tsv" => Box::new(TSVWriter::new(output_buffer)),
+            "jsonl" => Box::new(JSONLWriter::new(
+                false,
+                st_counts,
+                cut_edges_count,
+                output_buffer,
+            )),
+            "pcompress" => Box::new(PcompressWriter::new(output_buffer)),
+            "jsonl-full" => Box::new(JSONLWriter::new(
+                true,
+                st_counts,
+                cut_edges_count,
+                output_buffer,
+            )),
+            "assignments" => Box::new(AssignmentsOnlyWriter::new(false, output_buffer)),
+            "canonicalized-assignments" => {
+                Box::new(AssignmentsOnlyWriter::new(true, output_buffer))
+            }
+            "canonical" => Box::new(CanonicalWriter::new(output_buffer)),
+            "ben" => Box::new(BenWriter::new(output_buffer)),
+            bad => panic!("Parameter error: invalid writer '{}'", bad),
+        }
+    };
 
     let show_progress = matches.get_flag("show-progress");
 

@@ -1,4 +1,5 @@
 //! Library definition for frcw.
+pub mod bendl;
 mod buffers;
 pub mod config;
 pub mod graph;

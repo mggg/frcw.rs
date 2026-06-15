@@ -72,8 +72,36 @@ pub fn from_networkx(
     partial_columns: Vec<String>,
     edge_float_cols: Vec<String>,
 ) -> SerdeResult<(Graph, Partition)> {
+    let raw = fs::read_to_string(path).expect("Could not load graph");
+    let data: Value = serde_json::from_str(&raw)?;
+    from_networkx_value(
+        data,
+        pop_col,
+        assignment_col,
+        columns,
+        partial_columns,
+        edge_float_cols,
+    )
+}
+
+/// Loads graph and partition data from an already-parsed NetworkX
+/// `adjacency_data` JSON tree. This is the in-memory counterpart to
+/// [`from_networkx`]: the `bendl` writer reorders the graph JSON in memory and
+/// builds the chain from the exact bytes it embeds, so the run and the embedded
+/// Graph asset can never diverge.
+///
+/// Arguments match [`from_networkx`] except that `data` is the parsed graph tree
+/// rather than a file path.
+pub fn from_networkx_value(
+    data: Value,
+    pop_col: &str,
+    assignment_col: &str,
+    columns: Vec<String>,
+    partial_columns: Vec<String>,
+    edge_float_cols: Vec<String>,
+) -> SerdeResult<(Graph, Partition)> {
     let (graph, data) =
-        match graph_from_networkx(path, pop_col, columns, partial_columns, edge_float_cols) {
+        match graph_from_networkx_value(data, pop_col, columns, partial_columns, edge_float_cols) {
             Ok(v) => v,
             Err(e) => return Err(e),
         };
@@ -175,10 +203,25 @@ pub fn graph_from_networkx(
     partial_columns: Vec<String>,
     edge_float_cols: Vec<String>,
 ) -> SerdeResult<(Graph, Value)> {
-    // TODO: should load from a generic buffer.
     let raw = fs::read_to_string(path).expect("Could not load graph");
     let data: Value = serde_json::from_str(&raw)?;
+    graph_from_networkx_value(data, pop_col, columns, partial_columns, edge_float_cols)
+}
 
+/// Loads graph data from an already-parsed NetworkX `adjacency_data` JSON tree.
+/// The in-memory counterpart to [`graph_from_networkx`]; see [`from_networkx_value`]
+/// for why the bundle path needs this. Returns the graph and echoes `data` back so
+/// callers can read further columns (e.g. the assignment column) without re-parsing.
+///
+/// Arguments match [`graph_from_networkx`] except that `data` is the parsed graph
+/// tree rather than a file path.
+pub fn graph_from_networkx_value(
+    data: Value,
+    pop_col: &str,
+    columns: Vec<String>,
+    partial_columns: Vec<String>,
+    edge_float_cols: Vec<String>,
+) -> SerdeResult<(Graph, Value)> {
     let raw_nodes = data["nodes"].as_array().unwrap();
     let raw_adj = data["adjacency"].as_array().unwrap();
     let num_nodes = raw_nodes.len();

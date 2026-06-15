@@ -4,8 +4,9 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 use clap::{value_parser, Arg, ArgAction, Command};
+use frcw::bendl::{reorder_graph_json, BendlGraphOrder};
 use frcw::config::parse_region_weights_config;
-use frcw::init::from_networkx;
+use frcw::init::{from_networkx, from_networkx_value};
 use frcw::objectives::{
     ensure_derived_perim_column, make_objective, partial_node_cols, polsby_popper_autoderive,
     required_edge_cols, required_node_cols,
@@ -15,13 +16,36 @@ use frcw::recom::tilted::{
 };
 use frcw::recom::{RecomParams, RecomVariant};
 use frcw::stats::{
-    AssignmentsOnlyWriter, BenWriter, CanonicalWriter, JSONLWriter, PcompressWriter, ScoresWriter,
-    StatsWriter, TSVWriter,
+    AssignmentsOnlyWriter, BenWriter, BendlBenStreamWriter, CanonicalWriter, JSONLWriter,
+    PcompressWriter, ScoresWriter, StatsWriter, TSVWriter,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use sha3::{Digest, Sha3_256};
+use std::fs::OpenOptions;
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
+
+/// SHA3-256 hex digest of `bytes`, matching the file-hash provenance format.
+fn sha3_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha3_256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+/// Open a concrete seekable output file for the `bendl` writer, enforcing the
+/// same overwrite guard as [`output_buffer`]. BENDL patches its header and
+/// directory by seeking, so it cannot use the boxed (stdout-capable) sink.
+fn bendl_output_file(path: &str, overwrite_output: bool) -> BufWriter<fs::File> {
+    assert_can_write_output(Path::new(path), overwrite_output);
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .unwrap_or_else(|e| panic!("Could not open output file {}: {}", path, e));
+    BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, file)
+}
 
 fn assert_can_write_output(path: &Path, overwrite_output: bool) {
     if path.exists() && !overwrite_output {
@@ -263,7 +287,23 @@ fn main() {
                     \tjsonl-full: JSON Lines with basic summary statistics and recombined nodes\n\
                     \ttsv: Tab-separated proposal statistics\n\
                     \tpcompress: Compressed binary format for post-processing with pcompress\n\
-                    \tben: Compressed binary format for post-processing with BEN",
+                    \tben: Compressed binary format for post-processing with BEN\n\
+                    \tbendl: Self-describing BENDL file (graph + metadata + BEN stream in one \
+                        file); suppresses the _metadata.jsonl sidecar",
+                ),
+        )
+        .arg(
+            Arg::new("bendl_graph_order")
+                .long("bendl-graph-order")
+                .value_parser(value_parser!(String))
+                .default_value("none")
+                .help(
+                    "Graph reordering applied before the chain runs, for better BENDL stream \
+                    compression. Only valid with '--writer bendl'.\n\
+                    \tnone (default): embed the graph as-is\n\
+                    \trcm: Reverse Cuthill-McKee ordering\n\
+                    \tmlc: multilevel-cluster ordering\n\
+                    \tkey:<attr>: sort nodes by node attribute <attr> (must be on every node)",
                 ),
         )
         .arg(
@@ -322,10 +362,32 @@ fn main() {
         .as_str();
     let overwrite_output = matches.get_flag("overwrite-output");
     let show_progress = matches.get_flag("show-progress");
+    // BENDL needs a seekable file and embeds its provenance in the bundle's
+    // Metadata asset, so the separate _metadata.jsonl sidecar is suppressed.
+    let is_bendl = writer_str == "bendl";
+    let bendl_order = BendlGraphOrder::parse(
+        matches
+            .get_one::<String>("bendl_graph_order")
+            .expect("bendl_graph_order has a default value"),
+    )
+    .unwrap_or_else(|e| panic!("Parameter error: {}", e));
+    if !bendl_order.is_none() && !is_bendl {
+        panic!("Parameter error: '--bendl-graph-order' is only valid with '--writer bendl'.");
+    }
+    if is_bendl && matches.get_one::<String>("output-file").is_none() {
+        panic!(
+            "Parameter error: '--writer bendl' requires '--output-file' \
+             (BENDL needs a seekable file and cannot stream to stdout)."
+        );
+    }
     let metadata_base_path = matches
         .get_one::<String>("output-file")
         .or_else(|| matches.get_one::<String>("scores-output-file"));
-    let metadata_path = metadata_base_path.map(|path| metadata_path(path));
+    let metadata_path = if is_bendl {
+        None
+    } else {
+        metadata_base_path.map(|path| metadata_path(path))
+    };
     if let (Some(output_path), Some(scores_path)) = (
         matches.get_one::<String>("output-file"),
         matches.get_one::<String>("scores-output-file"),
@@ -388,7 +450,9 @@ fn main() {
                 "Parameter error: '--metropolis-beta' is required when '--accept-rule' is 'metropolis'.",
             );
             if !beta.is_finite() || beta < 0.0 {
-                panic!("Parameter error: '--metropolis-beta' must be a finite non-negative number.");
+                panic!(
+                    "Parameter error: '--metropolis-beta' must be a finite non-negative number."
+                );
             }
             if accept_worse_prob.is_some() {
                 panic!(
@@ -477,15 +541,55 @@ fn main() {
         }
     }
 
-    let (mut graph, partition) = from_networkx(
-        &graph_json,
-        pop_col,
-        assignment_col,
-        sum_cols,
-        partial_cols,
-        edge_cols,
-    )
-    .unwrap();
+    // Load the graph and partition and compute graph provenance. The bendl arm
+    // reorders the JSON in memory and builds the chain from the exact bytes it
+    // will embed, so the run and the embedded Graph asset can never diverge.
+    let (mut graph, partition, embed_bytes, source_graph_sha3, embedded_graph_sha3) = if is_bendl {
+        let source_bytes = fs::read(&graph_json)
+            .unwrap_or_else(|e| panic!("Could not read graph file {}: {}", graph_json, e));
+        let source_sha3 = sha3_hex(&source_bytes);
+        let embed_bytes = reorder_graph_json(&source_bytes, &bendl_order)
+            .unwrap_or_else(|e| panic!("Could not reorder graph for BENDL: {}", e));
+        let embedded_sha3 = sha3_hex(&embed_bytes);
+        let data: Value = serde_json::from_slice(&embed_bytes)
+            .unwrap_or_else(|e| panic!("Could not parse reordered graph JSON: {}", e));
+        let (graph, partition) = from_networkx_value(
+            data,
+            pop_col,
+            assignment_col,
+            sum_cols,
+            partial_cols,
+            edge_cols,
+        )
+        .unwrap();
+        (
+            graph,
+            partition,
+            Some(embed_bytes),
+            source_sha3,
+            Some(embedded_sha3),
+        )
+    } else {
+        let (graph, partition) = from_networkx(
+            &graph_json,
+            pop_col,
+            assignment_col,
+            sum_cols,
+            partial_cols,
+            edge_cols,
+        )
+        .unwrap();
+        let mut graph_file = fs::File::open(&graph_json).unwrap();
+        let mut graph_hasher = Sha3_256::new();
+        io::copy(&mut graph_file, &mut graph_hasher).unwrap();
+        (
+            graph,
+            partition,
+            None,
+            format!("{:x}", graph_hasher.finalize()),
+            None,
+        )
+    };
     if let Some((perim_col, boundary_perim_col, shared_perim_col)) =
         polsby_popper_autoderive(objective_config)
     {
@@ -543,16 +647,12 @@ fn main() {
         edge_weight_keys: edge_weight_keys,
     };
 
-    let mut graph_file = fs::File::open(&graph_json).unwrap();
-    let mut graph_hasher = Sha3_256::new();
-    io::copy(&mut graph_file, &mut graph_hasher).unwrap();
-    let graph_hash = format!("{:x}", graph_hasher.finalize());
     let mut meta = json!({
         "assignment_col": assignment_col,
         "tol": tol,
         "pop_col": pop_col,
         "graph_path": graph_json,
-        "graph_sha3": graph_hash,
+        "graph_sha3": source_graph_sha3,
         "rng_seed": rng_seed,
         "num_threads": n_threads,
         "num_steps": n_steps,
@@ -604,6 +704,24 @@ fn main() {
             .unwrap()
             .insert("region_weights".to_string(), json!(region_weights));
     }
+    // For BENDL the original-file hash no longer verifies the (possibly
+    // reordered) embedded asset, so replace `graph_sha3` with explicit
+    // source/embedded provenance plus the ordering applied. When order=none the
+    // two hashes are equal.
+    if is_bendl {
+        let meta_object = meta.as_object_mut().unwrap();
+        meta_object.remove("graph_sha3");
+        meta_object.insert("source_graph_sha3".to_string(), json!(source_graph_sha3));
+        meta_object.insert(
+            "embedded_graph_sha3".to_string(),
+            json!(embedded_graph_sha3
+                .clone()
+                .expect("bendl computes the embedded hash")),
+        );
+        meta_object.insert("bendl_graph_order".to_string(), json!(bendl_order.label()));
+    }
+    // The sidecar is suppressed in bendl mode (`metadata_path` is `None`); the
+    // same provenance lives in the bundle's Metadata asset.
     let mut metadata_writer: Option<Box<dyn io::Write + Send>> = metadata_path
         .as_ref()
         .map(|path| output_buffer(path.to_str().unwrap(), overwrite_output));
@@ -612,7 +730,17 @@ fn main() {
         writer.flush().unwrap();
     }
 
-    let mut stats_writer: Option<Box<dyn StatsWriter>> =
+    let mut stats_writer: Option<Box<dyn StatsWriter>> = if is_bendl {
+        let path = matches
+            .get_one::<String>("output-file")
+            .expect("bendl requires --output-file");
+        let bundle_file = bendl_output_file(path, overwrite_output);
+        Some(Box::new(BendlBenStreamWriter::new(
+            bundle_file,
+            embed_bytes.expect("bendl computes the embed bytes"),
+            meta.to_string().into_bytes(),
+        )))
+    } else {
         match matches.get_one::<String>("output-file") {
             Some(path) => Some(make_stats_writer(
                 writer_str,
@@ -624,7 +752,8 @@ fn main() {
                 }
                 None
             }
-        };
+        }
+    };
     let mut scores_writer: Option<ScoresWriter> = matches
         .get_one::<String>("scores-output-file")
         .map(|path| ScoresWriter::new(output_buffer(path, overwrite_output)));

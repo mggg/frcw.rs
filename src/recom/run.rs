@@ -58,6 +58,12 @@ struct StepPacket {
 }
 
 /// Starts a thread that writes statistics from accepted plans to `stdout`.
+///
+/// Protocol (mirrors the tilted writer thread): a packet with `proposal:
+/// Some(_)` is an accepted step and drives [`StatsWriter::step`]; a packet with
+/// `proposal: None` and `terminate == false` is a pure self-loop batch and
+/// drives [`StatsWriter::self_loop`] (used to flush the self-loops sampled after
+/// the last accepted proposal); `terminate == true` ends the thread.
 fn start_stats_thread(
     graph: &Graph,
     mut partition: Partition,
@@ -67,11 +73,16 @@ fn start_stats_thread(
     writer.init(graph, &partition).unwrap();
     let mut next: StepPacket = recv.recv().unwrap();
     while !next.terminate {
-        let proposal = next.proposal.unwrap();
-        partition.update(&proposal);
-        writer
-            .step(next.step, graph, &partition, &proposal, &next.counts)
-            .unwrap();
+        if let Some(proposal) = next.proposal {
+            partition.update(&proposal);
+            writer
+                .step(next.step, graph, &partition, &proposal, &next.counts)
+                .unwrap();
+        } else {
+            writer
+                .self_loop(next.step, graph, &partition, &next.counts)
+                .unwrap();
+        }
         next = recv.recv().unwrap();
     }
     writer.close().unwrap();
@@ -415,12 +426,26 @@ pub fn multi_chain(
                     total -= 1;
                 }
             } else {
-                sampled = sampled + counts;
-                step += loops as u64;
+                // Clamp the batch to the run length still owed: a worker may
+                // report more rejections than there are steps left, and counting
+                // the overshoot would push the trailing self-loop frame past
+                // `num_steps`. Move only the capped rejections into `sampled`
+                // (the reason breakdown of the trimmed tail is irrelevant: this
+                // branch fires only once no further proposal can be accepted, so
+                // the capped `sampled` only ever feeds the residual self-loop
+                // packet, which is consumed via `counts.sum()`).
+                let remaining = effective_steps.saturating_sub(step) as usize;
+                let capped = loops.min(remaining);
+                for _ in 0..capped {
+                    if let Some(reason) = counts.index_and_dec(0) {
+                        sampled.inc(reason);
+                    }
+                }
+                step += capped as u64;
 
                 if let Some(pb) = pb_ref {
                     let remaining = effective_steps.saturating_sub(progress_count);
-                    let inc = remaining.min(loops as u64);
+                    let inc = remaining.min(capped as u64);
                     progress_count += inc;
                     if progress_count - last_drawn >= progress_chunk {
                         pb.set_position(progress_count);
@@ -437,6 +462,23 @@ pub fn multi_chain(
         // Terminate worker threads.
         for job in job_sends.iter() {
             stop_job_thread(job);
+        }
+        // Flush self-loops sampled after the last accepted proposal: without
+        // this, a chain ending on a run of rejections drops them and the output
+        // record count falls below `num_steps`. `step == effective_steps` here,
+        // so the packet satisfies the `self_loop` continuity contract shared by
+        // the assignments/canonical writers (`step == last_step + counts.sum()`).
+        // This runs even when nothing was ever accepted, so an all-rejection run
+        // still emits the full requested chain length before the error below.
+        if sampled.sum() > 0 {
+            stats_send
+                .send(StepPacket {
+                    step: effective_steps,
+                    proposal: None,
+                    counts: sampled,
+                    terminate: false,
+                })
+                .unwrap();
         }
         stop_stats_thread(&stats_send);
         if previously_accepted_proposal.is_none() {
