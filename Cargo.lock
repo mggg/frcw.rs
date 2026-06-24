@@ -138,7 +138,8 @@ checksum = "55248b47b0caf0546f7988906588779981c43bb1bc9d0c44087278f80cdb44ba"
 [[package]]
 name = "binary-ensemble"
 version = "1.0.0"
-source = "git+https://github.com/peterrrock2/binary-ensemble?branch=1.0.0#6c20a7cbca001f8554d211f5e3143c62e590fc2c"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ef521fdb7e2c6c5e4a4d50ed418c548ce865feef1a271fdeb5e0831aaea5069"
 dependencies = [
  "byteorder",
  "clap 4.5.51",
