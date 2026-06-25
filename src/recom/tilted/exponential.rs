@@ -1,6 +1,6 @@
-//! Metropolis acceptance rule for tilted runs.
+//! Exponential acceptance rule for tilted runs.
 //!
-//! `MetropolisAcceptance` accepts a non-improving proposal with probability
+//! `ExponentialAcceptance` accepts a non-improving proposal with probability
 //! `exp(beta * delta)`, where `delta` is signed by the optimization direction
 //! so that worse plans always produce `delta <= 0` (and therefore an
 //! acceptance probability in `(0, 1]`). Larger `beta` makes the chain pickier
@@ -20,11 +20,11 @@ use super::core::AcceptanceRule;
 /// probability lies in `(0, 1]` and decays as the proposal gets worse.
 /// `beta` must be non-negative; the CLI validates this at parse time.
 #[derive(Clone, Copy, Debug)]
-pub struct MetropolisAcceptance {
+pub struct ExponentialAcceptance {
     pub beta: f64,
 }
 
-impl AcceptanceRule for MetropolisAcceptance {
+impl AcceptanceRule for ExponentialAcceptance {
     fn accept_worse(
         &self,
         current: f64,

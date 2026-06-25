@@ -4,7 +4,7 @@
 //! better scores and accepts plans with worse scores according to a pluggable
 //! [`AcceptanceRule`]. The two acceptance rules currently provided live in
 //! sibling modules: `fixed::FixedAcceptance` accepts a worse plan with a fixed
-//! probability, and `metropolis::MetropolisAcceptance` accepts a worse plan
+//! probability, and `exponential::ExponentialAcceptance` accepts a worse plan
 //! with probability `exp(beta * delta)` where `delta` is signed by the
 //! optimization direction. Unlike short bursts, there is no burst boundary
 //! and no resetting to a global best state.

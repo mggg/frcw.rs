@@ -12,7 +12,8 @@ use frcw::objectives::{
     required_edge_cols, required_node_cols,
 };
 use frcw::recom::tilted::{
-    multi_tilted_runs_with_writer, FixedAcceptance, IncrementalBackend, MetropolisAcceptance,
+    multi_tilted_runs_with_writer, ExponentialAcceptance, FixedAcceptance, IncrementalBackend,
+    LinearAcceptance,
 };
 use frcw::recom::{RecomParams, RecomVariant};
 use frcw::stats::{
@@ -161,13 +162,14 @@ fn main() {
             Arg::new("accept_rule")
                 .long("accept-rule")
                 .required(false)
-                .value_parser(["fixed", "metropolis"])
-                .default_value("fixed")
+                .value_parser(["fixed", "linear", "exponential"])
+                .default_value("linear")
                 .help(
                     "Acceptance rule for proposals with a worse score. \
                     'fixed' accepts with constant probability '--accept-worse-prob'. \
-                    'metropolis' accepts with probability exp(beta * delta) using \
-                    '--metropolis-beta'.",
+                    'linear' accepts with probability max(0, 1 - beta * score_loss). \
+                    'exponential' accepts with probability exp(beta * delta) using \
+                    '--acceptance-beta'.",
                 ),
         )
         .arg(
@@ -182,14 +184,15 @@ fn main() {
                 ),
         )
         .arg(
-            Arg::new("metropolis_beta")
-                .long("metropolis-beta")
+            Arg::new("acceptance_beta")
+                .long("acceptance-beta")
                 .required(false)
+                .allow_hyphen_values(true)
                 .value_parser(value_parser!(f64))
                 .help(
-                    "Inverse temperature for '--accept-rule metropolis'. Must be \
-                    non-negative. 0.0 reduces to a random walk; larger values are \
-                    pickier about how much worse a proposal can be.",
+                    "Tilt strength for '--accept-rule linear' and '--accept-rule \
+                    exponential'. Must be positive for linear and non-negative \
+                    for exponential. Defaults to 1.0.",
                 ),
         )
         .arg(
@@ -351,7 +354,7 @@ fn main() {
         .expect("accept_rule has a default value")
         .as_str();
     let accept_worse_prob = matches.get_one::<f64>("accept_worse_prob").copied();
-    let metropolis_beta = matches.get_one::<f64>("metropolis_beta").copied();
+    let acceptance_beta = matches.get_one::<f64>("acceptance_beta").copied();
 
     let maximize = *matches
         .get_one::<bool>("maximize")
@@ -428,7 +431,8 @@ fn main() {
     }
     enum AcceptanceConfig {
         Fixed(FixedAcceptance),
-        Metropolis(MetropolisAcceptance),
+        Linear(LinearAcceptance),
+        Exponential(ExponentialAcceptance),
     }
     let accept_config = match accept_rule_str {
         "fixed" => {
@@ -438,20 +442,33 @@ fn main() {
             if prob < 0.0 || prob > 1.0 {
                 panic!("Parameter error: '--accept-worse-prob' must be between 0 and 1.");
             }
-            if metropolis_beta.is_some() {
+            if acceptance_beta.is_some() {
                 panic!(
-                    "Parameter error: '--metropolis-beta' is only valid with '--accept-rule metropolis'."
+                    "Parameter error: '--acceptance-beta' is only valid with '--accept-rule linear' \
+                     or '--accept-rule exponential'."
                 );
             }
             AcceptanceConfig::Fixed(FixedAcceptance { prob })
         }
-        "metropolis" => {
-            let beta = metropolis_beta.expect(
-                "Parameter error: '--metropolis-beta' is required when '--accept-rule' is 'metropolis'.",
-            );
+        "linear" => {
+            if accept_worse_prob.is_some() {
+                panic!(
+                    "Parameter error: '--accept-worse-prob' is only valid with '--accept-rule fixed'."
+                );
+            }
+            let beta = acceptance_beta.unwrap_or(1.0);
+            if !beta.is_finite() || beta <= 0.0 {
+                panic!(
+                    "Parameter error: '--acceptance-beta' must be a finite positive number."
+                );
+            }
+            AcceptanceConfig::Linear(LinearAcceptance { beta })
+        }
+        "exponential" => {
+            let beta = acceptance_beta.unwrap_or(1.0);
             if !beta.is_finite() || beta < 0.0 {
                 panic!(
-                    "Parameter error: '--metropolis-beta' must be a finite non-negative number."
+                    "Parameter error: '--acceptance-beta' must be a finite non-negative number."
                 );
             }
             if accept_worse_prob.is_some() {
@@ -459,7 +476,7 @@ fn main() {
                     "Parameter error: '--accept-worse-prob' is only valid with '--accept-rule fixed'."
                 );
             }
-            AcceptanceConfig::Metropolis(MetropolisAcceptance { beta })
+            AcceptanceConfig::Exponential(ExponentialAcceptance { beta })
         }
         other => panic!("Parameter error: unknown acceptance rule '{other}'."),
     };
@@ -672,11 +689,11 @@ fn main() {
                     .insert("accept_worse_prob".to_string(), json!(prob));
             }
         }
-        "metropolis" => {
-            if let Some(beta) = metropolis_beta {
+        "linear" | "exponential" => {
+            if let Some(beta) = acceptance_beta {
                 meta.as_object_mut()
                     .unwrap()
-                    .insert("metropolis_beta".to_string(), json!(beta));
+                    .insert("acceptance_beta".to_string(), json!(beta));
             }
         }
         _ => {}
@@ -774,7 +791,21 @@ fn main() {
             scores_writer.as_mut(),
             show_progress,
         ),
-        AcceptanceConfig::Metropolis(rule) => multi_tilted_runs_with_writer(
+        AcceptanceConfig::Linear(rule) => multi_tilted_runs_with_writer(
+            &graph,
+            partition,
+            &params,
+            n_threads,
+            backend,
+            rule,
+            maximize,
+            stats_writer
+                .as_mut()
+                .map(|writer| &mut **writer as &mut dyn StatsWriter),
+            scores_writer.as_mut(),
+            show_progress,
+        ),
+        AcceptanceConfig::Exponential(rule) => multi_tilted_runs_with_writer(
             &graph,
             partition,
             &params,

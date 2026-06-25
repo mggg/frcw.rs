@@ -3,8 +3,8 @@ use frcw::graph::Graph;
 use frcw::objectives::{make_objective, make_objective_fn, required_node_cols};
 use frcw::partition::Partition;
 use frcw::recom::tilted::{
-    multi_tilted_runs, multi_tilted_runs_with_writer, AcceptanceRule, FixedAcceptance,
-    FullRescoreBackend, IncrementalBackend, MetropolisAcceptance,
+    multi_tilted_runs, multi_tilted_runs_with_writer, AcceptanceRule, ExponentialAcceptance,
+    FixedAcceptance, FullRescoreBackend, IncrementalBackend, LinearAcceptance,
 };
 use frcw::recom::RecomProposal;
 use frcw::recom::{RecomParams, RecomVariant};
@@ -793,17 +793,17 @@ fn test_tilted_virginia_multi_election() {
     assert_partition_valid(&graph, &final_partition, min_pop, max_pop);
 }
 
-// ===========================================
-// == Metropolis acceptance rule unit tests ==
-// ===========================================
+// ============================================
+// == Exponential acceptance rule unit tests ==
+// ============================================
 
 #[test]
-fn test_metropolis_accepts_improvements_via_engine_invariant() {
+fn test_exponential_accepts_improvements_via_engine_invariant() {
     // The engine never calls accept_worse on a strictly improving proposal,
     // so this test exercises the rule's behavior when delta < 0 only.
     use rand::rngs::SmallRng;
     use rand::SeedableRng;
-    let rule = MetropolisAcceptance { beta: 1.0 };
+    let rule = ExponentialAcceptance { beta: 1.0 };
     let mut rng = SmallRng::seed_from_u64(42);
     // current=0.0, proposed=-1.0, maximize=true -> delta = -1.0
     // exp(-1.0) ~= 0.3679; just confirm we can call without panicking and the
@@ -816,29 +816,23 @@ fn test_metropolis_accepts_improvements_via_engine_invariant() {
     let expected = (-1.0_f64).exp();
     assert!(
         (rate - expected).abs() < 0.02,
-        "metropolis empirical rate {} too far from exp(-1) = {}",
+        "exponential empirical rate {} too far from exp(-1) = {}",
         rate,
         expected,
     );
 }
 
 #[rstest]
-fn test_metropolis_acceptance_rate_decays_with_delta(
-    #[values(true, false)] maximize: bool,
-) {
+fn test_exponential_acceptance_rate_decays_with_delta(#[values(true, false)] maximize: bool) {
     use rand::rngs::SmallRng;
     use rand::SeedableRng;
-    let rule = MetropolisAcceptance { beta: 1.5 };
+    let rule = ExponentialAcceptance { beta: 1.5 };
     let trials = 30_000;
     // Worse-proposal magnitudes (interpreted in the optimization direction).
     let magnitudes = [0.1, 0.5, 1.0, 2.0];
     let mut rates = Vec::with_capacity(magnitudes.len());
     for (i, mag) in magnitudes.iter().enumerate() {
-        let (current, proposed) = if maximize {
-            (0.0, -mag)
-        } else {
-            (0.0, *mag)
-        };
+        let (current, proposed) = if maximize { (0.0, -mag) } else { (0.0, *mag) };
         let mut rng = SmallRng::seed_from_u64(2026 + i as u64);
         let accepts = (0..trials)
             .filter(|_| rule.accept_worse(current, proposed, maximize, &mut rng))
@@ -858,17 +852,17 @@ fn test_metropolis_acceptance_rate_decays_with_delta(
     for window in rates.windows(2) {
         assert!(
             window[0] > window[1],
-            "metropolis acceptance rate should decrease with worsening delta: {:?}",
+            "exponential acceptance rate should decrease with worsening delta: {:?}",
             rates,
         );
     }
 }
 
 #[test]
-fn test_metropolis_zero_beta_accepts_everything() {
+fn test_exponential_zero_beta_accepts_everything() {
     use rand::rngs::SmallRng;
     use rand::SeedableRng;
-    let rule = MetropolisAcceptance { beta: 0.0 };
+    let rule = ExponentialAcceptance { beta: 0.0 };
     let mut rng = SmallRng::seed_from_u64(7);
     // exp(0 * delta) = 1, so accept_worse must return true for any worse
     // proposal regardless of how bad it is.
@@ -879,7 +873,76 @@ fn test_metropolis_zero_beta_accepts_everything() {
 }
 
 #[rstest]
-fn test_tilted_metropolis_partition_valid_grid(
+fn test_linear_acceptance_rate_is_one_minus_loss(#[values(true, false)] maximize: bool) {
+    use rand::rngs::SmallRng;
+    use rand::SeedableRng;
+    let rule = LinearAcceptance { beta: 1.0 };
+    let trials = 30_000;
+    let losses = [0.1, 0.5, 0.9];
+    for (i, loss) in losses.iter().enumerate() {
+        let (current, proposed) = if maximize { (0.0, -loss) } else { (0.0, *loss) };
+        let mut rng = SmallRng::seed_from_u64(9000 + i as u64);
+        let accepts = (0..trials)
+            .filter(|_| rule.accept_worse(current, proposed, maximize, &mut rng))
+            .count();
+        let rate = accepts as f64 / trials as f64;
+        let expected = 1.0 - loss;
+        assert!(
+            (rate - expected).abs() < 0.02,
+            "linear rate {} far from 1 - {} = {} (maximize={})",
+            rate,
+            loss,
+            expected,
+            maximize,
+        );
+    }
+}
+
+#[test]
+fn test_linear_rejects_loss_of_one_or_more() {
+    use rand::rngs::SmallRng;
+    use rand::SeedableRng;
+    let rule = LinearAcceptance { beta: 1.0 };
+    let mut rng = SmallRng::seed_from_u64(11);
+    for _ in 0..1_000 {
+        assert!(!rule.accept_worse(0.0, -1.0, true, &mut rng));
+        assert!(!rule.accept_worse(0.0, 1.0, false, &mut rng));
+    }
+}
+
+#[rstest]
+fn test_linear_acceptance_beta_scales_loss(#[values(true, false)] maximize: bool) {
+    use rand::rngs::SmallRng;
+    use rand::SeedableRng;
+    let rule = LinearAcceptance { beta: 10.0 };
+    let (current, proposed) = if maximize { (0.0, -0.05) } else { (0.0, 0.05) };
+    let mut rng = SmallRng::seed_from_u64(99);
+    let trials = 30_000;
+    let accepts = (0..trials)
+        .filter(|_| rule.accept_worse(current, proposed, maximize, &mut rng))
+        .count();
+    let rate = accepts as f64 / trials as f64;
+    assert!(
+        (rate - 0.5).abs() < 0.02,
+        "linear beta-scaled rate {} far from 1 - 10 * 0.05 = 0.5",
+        rate,
+    );
+}
+
+#[rstest]
+fn test_linear_rejects_at_scaled_loss_cutoff(#[values(true, false)] maximize: bool) {
+    use rand::rngs::SmallRng;
+    use rand::SeedableRng;
+    let rule = LinearAcceptance { beta: 10.0 };
+    let (current, proposed) = if maximize { (0.0, -0.1) } else { (0.0, 0.1) };
+    let mut rng = SmallRng::seed_from_u64(100);
+    for _ in 0..1_000 {
+        assert!(!rule.accept_worse(current, proposed, maximize, &mut rng));
+    }
+}
+
+#[rstest]
+fn test_tilted_exponential_partition_valid_grid(
     #[values(1, 4)] n_threads: usize,
     #[values(true, false)] maximize: bool,
     #[values(0.5, 5.0)] beta: f64,
@@ -905,11 +968,11 @@ fn test_tilted_metropolis_partition_valid_grid(
         FullRescoreBackend {
             obj_fn: dist0_pop_objective,
         },
-        MetropolisAcceptance { beta },
+        ExponentialAcceptance { beta },
         maximize,
         false,
     )
-    .expect("metropolis tilted run should not fail");
+    .expect("exponential tilted run should not fail");
     assert_partition_valid(&graph, &final_partition, min_pop, max_pop);
 }
 
@@ -1049,7 +1112,7 @@ fn test_backends_agree_on_virginia_election_wins(
 }
 
 #[rstest]
-fn test_backends_agree_under_metropolis(
+fn test_backends_agree_under_exponential(
     #[values(0.5, 5.0)] beta: f64,
     #[values(7, 2025)] seed: u64,
 ) {
@@ -1079,11 +1142,11 @@ fn test_backends_agree_under_metropolis(
         &params,
         1,
         FullRescoreBackend { obj_fn },
-        MetropolisAcceptance { beta },
+        ExponentialAcceptance { beta },
         true,
         false,
     )
-    .expect("full-rescore metropolis run should not fail");
+    .expect("full-rescore exponential run should not fail");
 
     let final_inc = multi_tilted_runs(
         &graph,
@@ -1091,15 +1154,15 @@ fn test_backends_agree_under_metropolis(
         &params,
         1,
         IncrementalBackend { objective },
-        MetropolisAcceptance { beta },
+        ExponentialAcceptance { beta },
         true,
         false,
     )
-    .expect("incremental metropolis run should not fail");
+    .expect("incremental exponential run should not fail");
 
     assert_eq!(
         final_full.assignments, final_inc.assignments,
-        "backends produced different chains (metropolis, beta={}, seed={})",
+        "backends produced different chains (exponential, beta={}, seed={})",
         beta, seed,
     );
 }
@@ -1130,10 +1193,8 @@ fn test_backends_agree_on_full_score_trajectory() {
     objective.cache_graph_cols(&mut graph);
 
     let pid = std::process::id();
-    let path_full =
-        std::env::temp_dir().join(format!("frcw_xback_full_{}.csv", pid));
-    let path_inc =
-        std::env::temp_dir().join(format!("frcw_xback_inc_{}.csv", pid));
+    let path_full = std::env::temp_dir().join(format!("frcw_xback_full_{}.csv", pid));
+    let path_inc = std::env::temp_dir().join(format!("frcw_xback_inc_{}.csv", pid));
     {
         let mut full_writer = ScoresWriter::new(Box::new(std::io::BufWriter::new(
             fs::File::create(&path_full).unwrap(),
