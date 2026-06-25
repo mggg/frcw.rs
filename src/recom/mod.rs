@@ -1,19 +1,17 @@
 //! Data structures and algorithms for the recombination (ReCom) Markov chain.
-use crate::buffers::{
-    ConnectivityBuffers, SpanningTreeBuffer, SplitBuffer, SubgraphBuffer,
-};
+use crate::buffers::{ConnectivityBuffers, SpanningTreeBuffer, SplitBuffer, SubgraphBuffer};
 use crate::graph::Graph;
 use crate::partition::Partition;
 use crate::spanning_tree::{RMSTSampler, RegionAwareSampler, SpanningTreeSampler, USTSampler};
 use rand::rngs::SmallRng;
 use rand::Rng;
 
-/// ReCom-based short-bursts optimizer.
-pub mod short_bursts;
 /// ReCom batch size autotuning.
 //mod autotune;
 /// ReCom runners.
 pub mod run;
+/// ReCom-based short-bursts optimizer.
+pub mod short_bursts;
 /// Tilted run optimization.
 pub mod tilted;
 
@@ -239,13 +237,9 @@ pub(crate) fn make_sampler(
                 edge_weight_keys,
             ))
         }
-        RecomVariant::DistrictPairsUST
-        | RecomVariant::CutEdgesUST
-        | RecomVariant::Reversible => {
+        RecomVariant::DistrictPairsUST | RecomVariant::CutEdgesUST | RecomVariant::Reversible => {
             if !edge_weight_keys.is_empty() {
-                panic!(
-                    "--edge-weight-keys is only supported for RMST and region-aware variants."
-                );
+                panic!("--edge-weight-keys is only supported for RMST and region-aware variants.");
             }
             Box::new(USTSampler::new(buf_size, rng))
         }

@@ -366,6 +366,7 @@ fn test_tilted_stats_writer_records_accepted_steps() {
         Some(&mut stats_writer),
         None,
         false,
+        false,
     )
     .unwrap();
     assert_eq!(stats_writer.init_calls, 1);
@@ -413,6 +414,7 @@ fn test_tilted_scores_writer_records_every_step() {
         None,
         Some(&mut scores_writer),
         false,
+        false,
     )
     .unwrap();
     let scores = fs::read_to_string(&path).unwrap();
@@ -432,6 +434,67 @@ fn test_tilted_scores_writer_records_every_step() {
     let final_score = dist0_pop_objective(&graph, &final_partition);
     let last_fields = lines.last().unwrap().split(',').collect::<Vec<_>>();
     assert_eq!(last_fields[1].parse::<f64>().unwrap(), final_score);
+
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn test_tilted_improved_scores_only_writer_records_only_improvements() {
+    let (graph, partition) = fixture_with_attributes("6x6", vec!["a_share", "b_share"]);
+    let params = RecomParams {
+        min_pop: 5,
+        max_pop: 7,
+        num_steps: 120,
+        rng_seed: RNG_SEED,
+        balance_ub: 0,
+        variant: RecomVariant::DistrictPairsRMST,
+        region_weights: None,
+        edge_weight_keys: vec![],
+    };
+    let path = std::env::temp_dir().join(format!(
+        "frcw_tilted_best_scores_{}_{}.csv",
+        std::process::id(),
+        RNG_SEED
+    ));
+    let output = Box::new(std::io::BufWriter::new(fs::File::create(&path).unwrap()));
+    let mut scores_writer = ScoresWriter::new(output);
+
+    multi_tilted_runs_with_writer(
+        &graph,
+        partition,
+        &params,
+        1,
+        FullRescoreBackend {
+            obj_fn: dist0_pop_objective,
+        },
+        FixedAcceptance { prob: 1.0 },
+        true,
+        None,
+        Some(&mut scores_writer),
+        false,
+        true,
+    )
+    .unwrap();
+
+    let scores = fs::read_to_string(&path).unwrap();
+    let lines = scores.lines().collect::<Vec<_>>();
+    assert_eq!(lines[0], "step,score");
+    assert!(lines.len() <= params.num_steps as usize + 1);
+
+    let mut prev_step = 0;
+    let mut prev_score = lines[1].split(',').nth(1).unwrap().parse::<f64>().unwrap();
+    for line in lines.iter().skip(2) {
+        let fields = line.split(',').collect::<Vec<_>>();
+        let step = fields[0].parse::<u64>().unwrap();
+        let score = fields[1].parse::<f64>().unwrap();
+        assert!(step > prev_step, "improved-only score steps must increase");
+        assert!(
+            score > prev_score,
+            "improved-only scores must strictly improve"
+        );
+        prev_step = step;
+        prev_score = score;
+    }
 
     fs::remove_file(path).unwrap();
 }
@@ -476,6 +539,7 @@ fn test_tilted_canonical_writer_mixed_ending_counts(
         true,
         Some(&mut writer),
         None,
+        false,
         false,
     )
     .unwrap();
@@ -556,6 +620,7 @@ fn test_tilted_canonical_writer_flushes_terminal_self_loops() {
         true,
         Some(&mut writer),
         None,
+        false,
         false,
     )
     .unwrap();
@@ -1210,6 +1275,7 @@ fn test_backends_agree_on_full_score_trajectory() {
             None,
             Some(&mut full_writer),
             false,
+            false,
         )
         .expect("full-rescore run should not fail");
     }
@@ -1227,6 +1293,7 @@ fn test_backends_agree_on_full_score_trajectory() {
             true,
             None,
             Some(&mut inc_writer),
+            false,
             false,
         )
         .expect("incremental run should not fail");

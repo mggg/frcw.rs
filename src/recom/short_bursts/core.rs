@@ -70,8 +70,7 @@ where
     B: ScoringBackend,
 {
     loop {
-        let Some((dist_a, dist_b)) = sample_dist_pair(graph, partition, params.variant, rng)
-        else {
+        let Some((dist_a, dist_b)) = sample_dist_pair(graph, partition, params.variant, rng) else {
             continue;
         };
         partition.subgraph(graph, &mut buffers.subgraph, dist_a, dist_b);
@@ -198,13 +197,7 @@ impl<S: Clone> BurstBest<S> {
 
     /// Updates the burst-best if `score` is a strict improvement.
     /// Returns whether the burst-best was updated.
-    fn observe(
-        &mut self,
-        partition: &Partition,
-        state: &S,
-        score: f64,
-        maximize: bool,
-    ) -> bool {
+    fn observe(&mut self, partition: &Partition, state: &S, score: f64, maximize: bool) -> bool {
         let strict = if maximize {
             score > self.score
         } else {
@@ -227,16 +220,11 @@ impl<S: Clone> BurstBest<S> {
 /// step. After every `burst_length` accepted steps the main thread snaps the
 /// chain back to the best-scoring plan seen during the burst.
 ///
-/// When `write_best_only = false`, the stats writer thread is called for
-/// every accepted chain step; sample numbers are sequential starting at 1.
-/// When `write_best_only = true`, the stats writer thread is called once per
-/// burst boundary with the snapped (best-of-burst) plan; sample numbers count
-/// bursts, not steps.
+/// The stats writer thread is called for every accepted chain step; sample
+/// numbers are sequential starting at 1.
 ///
-/// `scores_writer` mirrors `stats_writer`: one row per accepted chain step
-/// when `write_best_only = false`, one row per burst boundary when
-/// `write_best_only = true`. Each row carries the step's score, the running
-/// global best, and (on strict global improvements) per-district scores.
+/// The scores writer emits one row per accepted chain step when
+/// `write_improved_scores_only = false`, or one row per new global best when true.
 ///
 /// Because short-bursts emits full partitions to the writer (workers don't
 /// produce proposal diffs that the writer can stitch together), the stats
@@ -254,13 +242,11 @@ impl<S: Clone> BurstBest<S> {
 /// * `backend` - The scoring backend.
 /// * `maximize` - If true, maximize the objective. If false, minimize it.
 /// * `burst_length` - The number of accepted chain steps per burst.
-/// * `stats_writer` - Optional asynchronous writer. Cadence depends on
-///   `write_best_only` (see above).
+/// * `stats_writer` - Optional asynchronous writer for every accepted chain step.
 /// * `scores_writer` - Optional asynchronous writer for objective scores.
-///   Cadence matches `stats_writer`.
 /// * `show_progress` - If true, display a progress bar to stdout.
-/// * `write_best_only` - If true, emit one record per burst (the snapped
-///   plan); if false, emit one record per accepted chain step.
+/// * `write_improved_scores_only` - If true, score output emits only new
+///   global-best plans; stats output still emits every accepted chain step.
 pub fn multi_short_bursts_with_writer<B>(
     graph: &Graph,
     partition: Partition,
@@ -272,7 +258,7 @@ pub fn multi_short_bursts_with_writer<B>(
     stats_writer: Option<&mut dyn StatsWriter>,
     scores_writer: Option<&mut ScoresWriter>,
     show_progress: bool,
-    write_best_only: bool,
+    write_improved_scores_only: bool,
 ) -> Result<Partition, String>
 where
     B: ScoringBackend,
@@ -281,9 +267,7 @@ where
         return Err("n_threads must be at least 1".to_string());
     }
     if params.variant == RecomVariant::Reversible {
-        return Err(
-            "Reversible ReCom is not supported by the short bursts optimizer.".to_string(),
-        );
+        return Err("Reversible ReCom is not supported by the short bursts optimizer.".to_string());
     }
     if burst_length == 0 {
         return Err("burst_length must be at least 1".to_string());
@@ -388,7 +372,6 @@ where
         // Best-so-far over the entire run. The optimizer returns the best
         // partition seen, not the chain's final mid-burst state.
         let mut global_best_partition = partition.clone();
-        let mut global_best_state = state.clone();
         let mut global_best = initial_score;
 
         // Best-so-far within the current burst; the chain snaps to this
@@ -436,20 +419,31 @@ where
             if strict_global {
                 global_best = score;
                 global_best_partition = partition.clone();
-                global_best_state = state.clone();
+                if write_improved_scores_only {
+                    if let Some(send) = score_send.as_ref() {
+                        let ds = backend.step_district_scores(&state);
+                        send.send(BurstScorePacket {
+                            step,
+                            score,
+                            district_scores: ds,
+                            terminate: false,
+                        })
+                        .unwrap();
+                    }
+                }
             }
 
             // Per-step writes.
-            if !write_best_only {
-                writer_step += 1;
-                if let Some(send) = stats_send.as_ref() {
-                    send.send(BurstStatsPacket {
-                        step: writer_step,
-                        partition: Some(partition.clone()),
-                        terminate: false,
-                    })
-                    .unwrap();
-                }
+            writer_step += 1;
+            if let Some(send) = stats_send.as_ref() {
+                send.send(BurstStatsPacket {
+                    step: writer_step,
+                    partition: Some(partition.clone()),
+                    terminate: false,
+                })
+                .unwrap();
+            }
+            if !write_improved_scores_only {
                 if let Some(send) = score_send.as_ref() {
                     // Recompute the per-district vector for this step so the
                     // d_* columns reflect the current plan rather than the
@@ -468,44 +462,15 @@ where
             // Decide what diff to broadcast for the next round, snapping
             // at burst boundaries.
             let next_diff = if step_in_burst == burst_length as u64 {
-                let snapped =
-                    if maximize {
-                        burst_best.score > score
-                    } else {
-                        burst_best.score < score
-                    };
+                let snapped = if maximize {
+                    burst_best.score > score
+                } else {
+                    burst_best.score < score
+                };
                 if snapped {
                     partition = burst_best.partition.clone();
                     state = burst_best.state.clone();
                     score = burst_best.score;
-                }
-
-                // Per-burst writes (write_best_only mode).
-                if write_best_only {
-                    writer_step += 1;
-                    if let Some(send) = stats_send.as_ref() {
-                        send.send(BurstStatsPacket {
-                            step: writer_step,
-                            partition: Some(partition.clone()),
-                            terminate: false,
-                        })
-                        .unwrap();
-                    }
-                    if let Some(send) = score_send.as_ref() {
-                        // Recompute the per-district vector for the snapped
-                        // plan so the d_* columns reflect this row's score
-                        // rather than the last cached vector. (global_best is
-                        // already maintained by the unconditional per-step
-                        // best tracking above, so no update is needed here.)
-                        let ds = backend.step_district_scores(&state);
-                        send.send(BurstScorePacket {
-                            step: writer_step,
-                            score,
-                            district_scores: ds,
-                            terminate: false,
-                        })
-                        .unwrap();
-                    }
                 }
 
                 // Reset burst tracking and seed the next burst from the
@@ -536,33 +501,6 @@ where
         // Drain workers and writers.
         for job in job_sends.iter() {
             terminate_burst_worker(job);
-        }
-
-        // For write_best_only mode, emit one final record with the
-        // global-best plan when the chain ended mid-burst (no snap event
-        // has fired yet for the in-progress burst). Skipped when
-        // step_in_burst == 0 (the last iteration was a burst boundary
-        // and already emitted its snap).
-        if write_best_only && step_in_burst > 0 {
-            writer_step += 1;
-            if let Some(send) = stats_send.as_ref() {
-                send.send(BurstStatsPacket {
-                    step: writer_step,
-                    partition: Some(global_best_partition.clone()),
-                    terminate: false,
-                })
-                .unwrap();
-            }
-            if let Some(send) = score_send.as_ref() {
-                let ds = backend.step_district_scores(&global_best_state);
-                send.send(BurstScorePacket {
-                    step: writer_step,
-                    score: global_best,
-                    district_scores: ds,
-                    terminate: false,
-                })
-                .unwrap();
-            }
         }
 
         if let Some(send) = stats_send.as_ref() {

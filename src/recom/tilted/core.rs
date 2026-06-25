@@ -23,8 +23,8 @@ use super::super::{
     RecomVariant, WorkerBuffers,
 };
 use super::packets::{
-    collect_tilted_results, send_tilted_jobs, stop_tilted_workers, ScoredProposal,
-    TiltedJobPacket, TiltedResultPacket, TiltedScorePacket, TiltedStatsPacket,
+    collect_tilted_results, send_tilted_jobs, stop_tilted_workers, ScoredProposal, TiltedJobPacket,
+    TiltedResultPacket, TiltedScorePacket, TiltedStatsPacket,
 };
 use super::writers::{start_tilted_score_writer, start_tilted_stats_writer};
 use crate::buffers::graph_connected_buffered;
@@ -98,7 +98,7 @@ pub trait ScoringBackend: Send + Clone {
     fn initial_score(&self, graph: &Graph, partition: &Partition, state: &Self::State) -> f64;
 
     /// Returns per-district scores for the score writer's CSV header. An empty
-    /// vector switches the writer to the legacy three-column output.
+    /// vector switches the writer to the bare `step,score` output.
     fn initial_district_scores(&self, state: &Self::State) -> Vec<f64>;
 
     /// Scores a candidate proposal. Backends may mutate `partition` or
@@ -153,6 +153,8 @@ struct TiltedMainState<S: Send + Clone> {
     backend_state: S,
     /// Objective score of `partition`.
     current_score: f64,
+    /// Best objective score written so far by improved-only score output.
+    best_score: f64,
     /// Tilted rejection counts since the last accepted proposal.
     pending_counts: SelfLoopCounts,
 }
@@ -167,6 +169,7 @@ impl<S: Send + Clone> TiltedMainState<S> {
             partition,
             backend_state,
             current_score,
+            best_score: current_score,
         }
     }
 
@@ -210,6 +213,8 @@ impl<S: Send + Clone> TiltedMainState<S> {
         graph: &Graph,
         backend: &B,
         accepted: &ScoredProposal,
+        maximize: bool,
+        write_improved_scores_only: bool,
         stats_send: Option<&Sender<TiltedStatsPacket>>,
         score_send: Option<&Sender<TiltedScorePacket>>,
     ) where
@@ -236,14 +241,24 @@ impl<S: Send + Clone> TiltedMainState<S> {
             self.pending_counts = SelfLoopCounts::default();
         }
         if let Some(send) = score_send {
-            send.send(TiltedScorePacket {
-                first_step: self.step,
-                last_step: self.step,
-                score: self.current_score,
-                district_scores: backend.step_district_scores(&self.backend_state),
-                terminate: false,
-            })
-            .unwrap();
+            let strict_best = if maximize {
+                self.current_score > self.best_score
+            } else {
+                self.current_score < self.best_score
+            };
+            if !write_improved_scores_only || strict_best {
+                send.send(TiltedScorePacket {
+                    first_step: self.step,
+                    last_step: self.step,
+                    score: self.current_score,
+                    district_scores: backend.step_district_scores(&self.backend_state),
+                    terminate: false,
+                })
+                .unwrap();
+            }
+            if strict_best {
+                self.best_score = self.current_score;
+            }
         }
     }
 
@@ -292,14 +307,21 @@ fn interleave_tilted_round<B>(
     effective_steps: u64,
     rng: &mut SmallRng,
     job_sends: &[Sender<TiltedJobPacket>],
+    maximize: bool,
+    write_improved_scores_only: bool,
     stats_send: Option<&Sender<TiltedStatsPacket>>,
     score_send: Option<&Sender<TiltedScorePacket>>,
 ) where
     B: ScoringBackend,
 {
+    let rejection_score_send = if write_improved_scores_only {
+        None
+    } else {
+        score_send
+    };
     if proposals.is_empty() {
         let remaining = effective_steps.saturating_sub(state.step) as usize;
-        state.record_rejections(loops.min(remaining), score_send);
+        state.record_rejections(loops.min(remaining), rejection_score_send);
         send_tilted_jobs(job_sends, None, state.current_score);
         return;
     }
@@ -309,14 +331,22 @@ fn interleave_tilted_round<B>(
     while total > 0 && state.step < effective_steps {
         let event = rng.random_range(0..total);
         if event < loops {
-            state.record_rejections(1, score_send);
+            state.record_rejections(1, rejection_score_send);
             loops -= 1;
             total -= 1;
             continue;
         }
 
         let accepted = &proposals[rng.random_range(0..proposals.len())];
-        state.apply_accepted_proposal(graph, backend, accepted, stats_send, score_send);
+        state.apply_accepted_proposal(
+            graph,
+            backend,
+            accepted,
+            maximize,
+            write_improved_scores_only,
+            stats_send,
+            score_send,
+        );
         send_tilted_jobs(job_sends, Some(&accepted.proposal), state.current_score);
         break; // need new round (state changed)
     }
@@ -345,6 +375,8 @@ fn run_tilted_main_loop<B>(
     result_recv: &Receiver<TiltedResultPacket>,
     job_sends: &[Sender<TiltedJobPacket>],
     rng: &mut SmallRng,
+    maximize: bool,
+    write_improved_scores_only: bool,
     stats_send: Option<&Sender<TiltedStatsPacket>>,
     score_send: Option<&Sender<TiltedScorePacket>>,
     progress_bar: Option<&ProgressBar>,
@@ -368,6 +400,8 @@ fn run_tilted_main_loop<B>(
             effective_steps,
             rng,
             job_sends,
+            maximize,
+            write_improved_scores_only,
             stats_send,
             score_send,
         );
@@ -402,8 +436,7 @@ where
     R: AcceptanceRule,
 {
     loop {
-        let Some((dist_a, dist_b)) = sample_dist_pair(graph, partition, params.variant, rng)
-        else {
+        let Some((dist_a, dist_b)) = sample_dist_pair(graph, partition, params.variant, rng) else {
             continue;
         };
 
@@ -540,6 +573,7 @@ fn start_tilted_worker<B, R>(
 ///   and self-loop counts.
 /// * `score_writer` - Optional asynchronous writer for per-step objective scores.
 /// * `show_progress` - If true, show a progress bar tracking total chain steps.
+/// * `write_improved_scores_only` - If true, score output records only new global bests.
 pub fn multi_tilted_runs_with_writer<B, R>(
     graph: &Graph,
     partition: Partition,
@@ -551,6 +585,7 @@ pub fn multi_tilted_runs_with_writer<B, R>(
     stats_writer: Option<&mut dyn StatsWriter>,
     score_writer: Option<&mut ScoresWriter>,
     show_progress: bool,
+    write_improved_scores_only: bool,
 ) -> Result<Partition, String>
 where
     B: ScoringBackend,
@@ -662,6 +697,8 @@ where
             &result_recv,
             &job_sends,
             &mut rng,
+            maximize,
+            write_improved_scores_only,
             stats_send.as_ref(),
             score_send.as_ref(),
             progress_bar_ref,
@@ -731,5 +768,6 @@ where
         None,
         None,
         show_progress,
+        false,
     )
 }

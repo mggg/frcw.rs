@@ -108,7 +108,7 @@ fn test_short_bursts_returns_partition_matching_claimed_best_score() {
         None,
         None,
         false,
-        true, // write_best_only: hill-climbing semantics
+        false,
     )
     .unwrap();
 
@@ -130,7 +130,7 @@ fn test_short_bursts_returns_partition_matching_claimed_best_score() {
 }
 
 // =================================================================================
-// == Stats writer receives every accepted chain step (write_best_only=false).
+// == Stats writer receives every accepted chain step.
 // =================================================================================
 
 #[test]
@@ -165,7 +165,7 @@ fn test_short_bursts_writer_records_every_accepted_step() {
         Some(&mut writer),
         None,
         false,
-        false, // write_best_only=false: record every step
+        false, // write_improved_scores_only=false
     )
     .unwrap();
 
@@ -194,18 +194,17 @@ fn test_short_bursts_writer_records_every_accepted_step() {
 }
 
 // =================================================================================
-// == Stats writer receives only new global bests (write_best_only=true).
+// == Score filtering does not affect the stats/output writer.
 // =================================================================================
 
 #[test]
-fn test_short_bursts_write_best_only_records_only_improvements() {
+fn test_short_bursts_improved_scores_only_does_not_filter_output_writer() {
     let (mut graph, partition) = fixture_with_attributes("6x6", vec!["a_share", "b_share"]);
     let config = r#"{"objective":"election_wins","elections":[{"votes_a":"a_share","votes_b":"b_share"}],"target":"a","aggregation":"mean"}"#;
     let objective = make_objective(config);
     objective.cache_graph_cols(&mut graph);
-    let initial_score = objective.score(&graph, &partition);
 
-    let params = make_params(500);
+    let params = make_params(50);
     let mut writer = RecordingWriter::new();
     multi_short_bursts_with_writer(
         &graph,
@@ -218,44 +217,33 @@ fn test_short_bursts_write_best_only_records_only_improvements() {
         Some(&mut writer),
         None,
         false,
-        true, // write_best_only=true: record only improvements
+        true, // write_improved_scores_only=true: stats/output still records every step
     )
     .unwrap();
 
     // Sample numbers must be sequential (1, 2, 3, ...).
     for (i, &s) in writer.steps.iter().enumerate() {
-        assert_eq!(s, (i + 1) as u64, "non-sequential sample number at index {}", i);
+        assert_eq!(
+            s,
+            (i + 1) as u64,
+            "non-sequential sample number at index {}",
+            i
+        );
     }
 
-    // Every partition recorded must have a score >= the previous recorded score.
-    // A violation would mean we wrote a plan that was not actually an improvement.
-    let mut prev_score = initial_score;
-    for (i, partition) in writer.partitions.iter().enumerate() {
-        let score = objective.score(&graph, partition);
-        assert!(
-            score >= prev_score,
-            "write-best-only writer received a non-improving partition at index {}: \
-             score {} < previous {}",
-            i,
-            score,
-            prev_score
-        );
-        prev_score = score;
-    }
+    assert_eq!(writer.steps.len() as u64, params.num_steps - 1);
 }
 
 // =================================================================================
-// == Cross-validation: write_best_only=true is a strict subset of
-// == write_best_only=false, and scores_writer row count matches improvement count.
+// == Cross-validation: write_improved_scores_only filters only the scores CSV.
 //
 // Both runs use the same RNG seed, so the underlying random walk is identical.
-// The write_best_only=false run records every accepted step; write_best_only=true
-// records only the steps that were new global bests. Every partition in the
-// best-only run must appear (in order) within the all-steps run.
+// The unfiltered scores run records every accepted step; improved-scores-only
+// records only rows that were new global bests.
 // =================================================================================
 
 #[test]
-fn test_short_bursts_write_best_only_cross_validation() {
+fn test_short_bursts_improved_scores_only_cross_validation() {
     use std::fs;
 
     let config = r#"{"objective":"election_wins","elections":[{"votes_a":"a_share","votes_b":"b_share"}],"target":"a","aggregation":"mean"}"#;
@@ -275,13 +263,13 @@ fn test_short_bursts_write_best_only_cross_validation() {
     let (mut graph, partition) = fixture_with_attributes("6x6", vec!["a_share", "b_share"]);
     make_objective(config).cache_graph_cols(&mut graph);
     let mut all_writer = RecordingWriter::new();
-    let scores_path = std::env::temp_dir().join(format!(
-        "frcw_sb_xval_scores_{}_{}.csv",
+    let all_scores_path = std::env::temp_dir().join(format!(
+        "frcw_sb_xval_all_scores_{}_{}.csv",
         std::process::id(),
         RNG_SEED
     ));
     let scores_out = Box::new(std::io::BufWriter::new(
-        fs::File::create(&scores_path).unwrap(),
+        fs::File::create(&all_scores_path).unwrap(),
     ));
     let mut scores_writer = ScoresWriter::new(scores_out);
 
@@ -298,14 +286,23 @@ fn test_short_bursts_write_best_only_cross_validation() {
         Some(&mut all_writer),
         Some(&mut scores_writer),
         false,
-        false, // write_best_only=false
+        false, // write_improved_scores_only=false
     )
     .unwrap();
 
-    // --- Run 2: record only improvements (same seed = same walk) ---
+    // --- Run 2: filter only the scores CSV (same seed = same walk) ---
     let (mut graph2, partition2) = fixture_with_attributes("6x6", vec!["a_share", "b_share"]);
     make_objective(config).cache_graph_cols(&mut graph2);
     let mut best_writer = RecordingWriter::new();
+    let best_scores_path = std::env::temp_dir().join(format!(
+        "frcw_sb_xval_best_scores_{}_{}.csv",
+        std::process::id(),
+        RNG_SEED
+    ));
+    let best_scores_out = Box::new(std::io::BufWriter::new(
+        fs::File::create(&best_scores_path).unwrap(),
+    ));
+    let mut best_scores_writer = ScoresWriter::new(best_scores_out);
 
     multi_short_bursts_with_writer(
         &graph2,
@@ -318,45 +315,21 @@ fn test_short_bursts_write_best_only_cross_validation() {
         true,
         burst_length,
         Some(&mut best_writer),
-        None,
+        Some(&mut best_scores_writer),
         false,
-        true, // write_best_only=true
+        true, // write_improved_scores_only=true
     )
     .unwrap();
 
-    // write_best_only=true emits one record per burst boundary, plus one
-    // final record if the chain ends mid-burst. Compute the exact expected
-    // count from the chain budget and burst length.
-    let effective = params.num_steps.saturating_sub(1) as usize;
-    let complete_bursts = effective / burst_length as usize;
-    let mid_burst_remainder = effective % burst_length as usize;
-    let expected_best_records =
-        complete_bursts + if mid_burst_remainder > 0 { 1 } else { 0 };
     assert_eq!(
         best_writer.partitions.len(),
-        expected_best_records,
-        "write_best_only=true should emit {} records ({} burst boundaries{}) but emitted {}",
-        expected_best_records,
-        complete_bursts,
-        if mid_burst_remainder > 0 { " + 1 final mid-burst snap" } else { "" },
-        best_writer.partitions.len(),
-    );
-
-    // The two modes share the same chain trajectory (same seed). The
-    // all-steps run records strictly more rows because it captures every
-    // accepted step rather than only burst-boundary snaps.
-    assert!(
-        best_writer.partitions.len() < all_writer.partitions.len(),
-        "write_best_only=true ({} records) should produce fewer records than \
-         write_best_only=false ({} records) over {} steps",
-        best_writer.partitions.len(),
         all_writer.partitions.len(),
-        params.num_steps
+        "score filtering must not affect --output-file/stat records"
     );
 
-    // Run 1 used write_best_only=false, so the scores CSV records one row
+    // Run 1 did not filter scores, so the scores CSV records one row
     // per accepted chain step (matching the all-steps stats writer).
-    let scores_content = fs::read_to_string(&scores_path).unwrap();
+    let scores_content = fs::read_to_string(&all_scores_path).unwrap();
     let scores_lines: Vec<&str> = scores_content.lines().collect();
     // lines[0] = header, lines[1] = init row at step 0, lines[2..] = data rows.
     let data_rows = scores_lines.len().saturating_sub(2);
@@ -379,7 +352,51 @@ fn test_short_bursts_write_best_only_cross_validation() {
         fields[1].parse::<f64>().unwrap();
     }
 
-    fs::remove_file(scores_path).unwrap();
+    let best_scores_content = fs::read_to_string(&best_scores_path).unwrap();
+    let best_scores_lines: Vec<&str> = best_scores_content.lines().collect();
+    assert_eq!(best_scores_lines[0], "step,score");
+
+    let parse_row = |line: &str| {
+        let fields: Vec<&str> = line.split(',').collect();
+        (
+            fields[0].parse::<u64>().unwrap(),
+            fields[1].parse::<f64>().unwrap(),
+        )
+    };
+    let all_rows: Vec<(u64, f64)> = scores_lines
+        .iter()
+        .skip(1)
+        .map(|line| parse_row(line))
+        .collect();
+    let mut expected_rows = vec![all_rows[0]];
+    let mut best = all_rows[0].1;
+    for &row in all_rows.iter().skip(1) {
+        if row.1 > best {
+            expected_rows.push(row);
+            best = row.1;
+        }
+    }
+    let best_rows: Vec<(u64, f64)> = best_scores_lines
+        .iter()
+        .skip(1)
+        .map(|line| parse_row(line))
+        .collect();
+    assert_eq!(best_rows, expected_rows);
+
+    let mut prev_step = 0;
+    let mut prev_score = best_rows[0].1;
+    for &(step, score) in best_rows.iter().skip(1) {
+        assert!(step > prev_step, "improved-only score steps must increase");
+        assert!(
+            score > prev_score,
+            "improved-only score rows must strictly improve"
+        );
+        prev_step = step;
+        prev_score = score;
+    }
+
+    fs::remove_file(all_scores_path).unwrap();
+    fs::remove_file(best_scores_path).unwrap();
 }
 
 // =================================================================================
@@ -388,7 +405,7 @@ fn test_short_bursts_write_best_only_cross_validation() {
 // ==
 // == Regression test for per-step recompute. Short bursts previously replayed
 // == the last cached district vector on non-best steps (and, under
-// == write_best_only, always emitted the seed vector). We reconstruct each
+// == improved-only score output, always emitted the seed vector). We reconstruct each
 // == row's plan from a stats writer and recompute its district scores
 // == independently, then require an exact match against the CSV d_* columns.
 // =================================================================================
@@ -433,7 +450,7 @@ fn test_short_bursts_scores_district_vector_tracks_each_step() {
         Some(&mut stats_writer),
         Some(&mut scores_writer),
         false,
-        false, // write_best_only=false (every accepted step)
+        false, // write_improved_scores_only=false
     )
     .unwrap();
 
@@ -541,7 +558,7 @@ fn test_short_bursts_hill_climbing_maximize() {
         None,
         None,
         false,
-        true, // write_best_only: hill-climbing semantics
+        false,
     )
     .unwrap();
 

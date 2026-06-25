@@ -84,8 +84,12 @@ impl BendlGraphOrder {
 pub fn reorder_graph_json(graph_bytes: &[u8], order: &BendlGraphOrder) -> io::Result<Vec<u8>> {
     match order {
         BendlGraphOrder::None => Ok(graph_bytes.to_vec()),
-        BendlGraphOrder::Rcm => order_by_method(graph_bytes, GraphOrderingMethod::ReverseCuthillMckee),
-        BendlGraphOrder::Mlc => order_by_method(graph_bytes, GraphOrderingMethod::MultiLevelCluster),
+        BendlGraphOrder::Rcm => {
+            order_by_method(graph_bytes, GraphOrderingMethod::ReverseCuthillMckee)
+        }
+        BendlGraphOrder::Mlc => {
+            order_by_method(graph_bytes, GraphOrderingMethod::MultiLevelCluster)
+        }
         BendlGraphOrder::Key(attr) => {
             // The crate sorter tolerates a missing key (sorting absent values as
             // the string "null"), which would silently reorder against bogus
@@ -156,7 +160,10 @@ mod tests {
 
     #[test]
     fn parse_recognizes_every_form() {
-        assert_eq!(BendlGraphOrder::parse("none").unwrap(), BendlGraphOrder::None);
+        assert_eq!(
+            BendlGraphOrder::parse("none").unwrap(),
+            BendlGraphOrder::None
+        );
         assert_eq!(BendlGraphOrder::parse("rcm").unwrap(), BendlGraphOrder::Rcm);
         assert_eq!(BendlGraphOrder::parse("mlc").unwrap(), BendlGraphOrder::Mlc);
         assert_eq!(

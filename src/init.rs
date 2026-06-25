@@ -273,7 +273,10 @@ pub fn graph_from_networkx_value(
             if let Some(data) = attr.get_mut(col) {
                 match node.get(col) {
                     Some(value) => data.push(
-                        value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string())
+                        value
+                            .as_str()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| value.to_string()),
                     ),
                     None => panic!(
                         "Node {} is missing required attribute '{}'. \
@@ -288,7 +291,10 @@ pub fn graph_from_networkx_value(
             if let Some(data) = attr.get_mut(col) {
                 match node.get(col) {
                     Some(value) => data.push(
-                        value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string())
+                        value
+                            .as_str()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| value.to_string()),
                     ),
                     None => data.push("null".to_string()),
                 }

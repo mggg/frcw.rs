@@ -713,7 +713,8 @@ impl StatsWriter for BenWriter {
     ) -> Result<()> {
         let next_assignment = partition.assignments.iter().map(|&x| x as u16).collect();
         let stream = self.stream.as_mut().expect("BenWriter stepped before init");
-        self.frames.push_step(stream, next_assignment, counts.sum() as u64)
+        self.frames
+            .push_step(stream, next_assignment, counts.sum() as u64)
     }
 
     fn self_loop(

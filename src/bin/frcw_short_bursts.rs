@@ -306,13 +306,12 @@ fn main() {
                 .help("Whether to show a progress bar during execution."),
         )
         .arg(
-            Arg::new("write-best-only")
-                .long("write-best-only")
+            Arg::new("write-improved-scores-only")
+                .long("write-improved-scores-only")
                 .action(ArgAction::SetTrue)
                 .help(
-                    "When set, the output writer records only partitions that improve the \
-                    global best objective score. By default every accepted chain step is \
-                    written. Has no effect when --output-file is not provided.",
+                    "When set, the scores writer records only rows that improve the global \
+                    best objective score. Has no effect without --scores-output-file.",
                 ),
         );
 
@@ -344,7 +343,7 @@ fn main() {
         .as_str();
     let overwrite_output = matches.get_flag("overwrite-output");
     let show_progress = matches.get_flag("show-progress");
-    let write_best_only = matches.get_flag("write-best-only");
+    let write_improved_scores_only = matches.get_flag("write-improved-scores-only");
 
     // BENDL needs a seekable file and embeds its provenance in the bundle's
     // Metadata asset, so the separate _metadata.jsonl sidecar is suppressed.
@@ -603,7 +602,7 @@ fn main() {
         "variant": variant_str,
         "overwrite_output": overwrite_output,
         "show_progress": show_progress,
-        "write_best_only": write_best_only,
+        "write_improved_scores_only": write_improved_scores_only,
         "graph_json": graph_json,
     });
     if let Some(path) = matches.get_one::<String>("output-file") {
@@ -698,7 +697,7 @@ fn main() {
             .map(|writer| &mut **writer as &mut dyn StatsWriter),
         scores_writer.as_mut(),
         show_progress,
-        write_best_only,
+        write_improved_scores_only,
     );
 
     match output {

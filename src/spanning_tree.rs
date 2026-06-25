@@ -464,7 +464,10 @@ mod tests {
                 break;
             }
         }
-        assert!(seen, "edge (1,2) should sometimes appear without an edge weight key");
+        assert!(
+            seen,
+            "edge (1,2) should sometimes appear without an edge weight key"
+        );
     }
 
     #[test]
@@ -493,11 +496,7 @@ mod tests {
         for seed in 0..64u64 {
             let mut rng = SmallRng::seed_from_u64(seed);
             sampler.random_spanning_tree_with_parent(
-                &subgraph,
-                &parent,
-                &raw_nodes,
-                &mut buf,
-                &mut rng,
+                &subgraph, &parent, &raw_nodes, &mut buf, &mut rng,
             );
             assert!(
                 !tree_has_edge(&buf, 1, 2),

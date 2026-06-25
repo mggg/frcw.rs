@@ -62,6 +62,7 @@ pub(super) fn start_tilted_score_writer(
     writer
         .init(initial_score, &initial_district_scores)
         .unwrap();
+    writer.flush().unwrap();
     let mut last_districts = initial_district_scores;
     let mut next = recv.recv().unwrap();
     while !next.terminate {
@@ -69,10 +70,9 @@ pub(super) fn start_tilted_score_writer(
             last_districts = new_districts;
         }
         for step in next.first_step..=next.last_step {
-            writer
-                .step(step, next.score, &last_districts)
-                .unwrap();
+            writer.step(step, next.score, &last_districts).unwrap();
         }
+        writer.flush().unwrap();
         next = recv.recv().unwrap();
     }
     writer.close().unwrap();

@@ -146,12 +146,7 @@ fn shares_from_pov(
 
 /// District share for the nodes on one side of a proposal, honoring the
 /// configured denominator.
-fn proposal_share(
-    graph: &Graph,
-    pov_counts_col: &str,
-    total: AbsDevTotal,
-    nodes: &[usize],
-) -> f64 {
+fn proposal_share(graph: &Graph, pov_counts_col: &str, total: AbsDevTotal, nodes: &[usize]) -> f64 {
     let pov = sum_attr_over(graph, pov_counts_col, nodes);
     match total {
         AbsDevTotal::Column(col) => district_share(pov, sum_attr_over(graph, col, nodes)),
@@ -247,31 +242,28 @@ fn parse_total(data: &Value) -> AbsDevTotal {
 ///
 /// The share denominator is parsed by [`parse_total`].
 pub(super) fn from_json(data: &Value) -> ObjectiveConfig {
-    let mut targets: Vec<f64> = if let Some(arr) =
-        data.get("target_values").and_then(|v| v.as_array())
-    {
-        assert!(!arr.is_empty(), "'target_values' must be non-empty");
-        arr.iter()
-            .map(|v| parse_share(v, "each 'target_values' entry"))
-            .collect()
-    } else if data.get("target").is_some() || data.get("n_target_districts").is_some() {
-        let target = parse_share(&data["target"], "'target'");
-        let n = data["n_target_districts"]
-            .as_u64()
-            .unwrap_or_else(|| {
+    let mut targets: Vec<f64> =
+        if let Some(arr) = data.get("target_values").and_then(|v| v.as_array()) {
+            assert!(!arr.is_empty(), "'target_values' must be non-empty");
+            arr.iter()
+                .map(|v| parse_share(v, "each 'target_values' entry"))
+                .collect()
+        } else if data.get("target").is_some() || data.get("n_target_districts").is_some() {
+            let target = parse_share(&data["target"], "'target'");
+            let n = data["n_target_districts"].as_u64().unwrap_or_else(|| {
                 panic!(
                     "'n_target_districts' must be a positive integer, got {}",
                     data["n_target_districts"]
                 )
             }) as usize;
-        assert!(n >= 1, "'n_target_districts' must be positive");
-        vec![target; n]
-    } else {
-        panic!(
-            "by_district_abs_deviation requires either 'target_values' (a list) \
+            assert!(n >= 1, "'n_target_districts' must be positive");
+            vec![target; n]
+        } else {
+            panic!(
+                "by_district_abs_deviation requires either 'target_values' (a list) \
              or the 'target' + 'n_target_districts' shorthand"
-        );
-    };
+            );
+        };
     targets.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
     let target_values: &'static [f64] = Box::leak(targets.into_boxed_slice());
 

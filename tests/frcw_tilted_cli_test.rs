@@ -140,6 +140,29 @@ fn linear_acceptance_beta_is_user_visible_and_scores_stay_finite() {
 }
 
 #[test]
+fn write_improved_scores_only_records_strict_improvements() {
+    let (scores_path, meta_path, meta) =
+        run_tilted("improved_scores", &["--write-improved-scores-only"]);
+
+    assert_eq!(meta["write_improved_scores_only"].as_bool(), Some(true));
+
+    let rows = score_rows(&scores_path);
+    assert_eq!(rows.first().map(|row| row.0), Some(0));
+    let mut prev = rows[0];
+    for &row in rows.iter().skip(1) {
+        assert!(row.0 > prev.0, "improved-only score steps must increase");
+        assert!(
+            row.1 < prev.1,
+            "minimizing improved-only scores must strictly decrease"
+        );
+        prev = row;
+    }
+
+    fs::remove_file(scores_path).ok();
+    fs::remove_file(meta_path).ok();
+}
+
+#[test]
 fn exponential_uses_shared_acceptance_beta() {
     let (scores_path, meta_path, meta) = run_tilted(
         "exponential_beta",

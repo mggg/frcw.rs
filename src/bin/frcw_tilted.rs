@@ -325,6 +325,15 @@ fn main() {
                 ),
         )
         .arg(
+            Arg::new("write-improved-scores-only")
+                .long("write-improved-scores-only")
+                .action(ArgAction::SetTrue)
+                .help(
+                    "When set, the score writer records only rows that improve the global best \
+                    objective score. Has no effect without --scores-output-file.",
+                ),
+        )
+        .arg(
             Arg::new("overwrite-output")
                 .long("overwrite-output")
                 .action(ArgAction::SetTrue)
@@ -365,6 +374,7 @@ fn main() {
         .as_str();
     let overwrite_output = matches.get_flag("overwrite-output");
     let show_progress = matches.get_flag("show-progress");
+    let write_improved_scores_only = matches.get_flag("write-improved-scores-only");
     // BENDL needs a seekable file and embeds its provenance in the bundle's
     // Metadata asset, so the separate _metadata.jsonl sidecar is suppressed.
     let is_bendl = writer_str == "bendl";
@@ -458,9 +468,7 @@ fn main() {
             }
             let beta = acceptance_beta.unwrap_or(1.0);
             if !beta.is_finite() || beta <= 0.0 {
-                panic!(
-                    "Parameter error: '--acceptance-beta' must be a finite positive number."
-                );
+                panic!("Parameter error: '--acceptance-beta' must be a finite positive number.");
             }
             AcceptanceConfig::Linear(LinearAcceptance { beta })
         }
@@ -678,6 +686,7 @@ fn main() {
         "maximize": maximize,
         "overwrite_output": overwrite_output,
         "show_progress": show_progress,
+        "write_improved_scores_only": write_improved_scores_only,
         "graph_json": graph_json,
     });
     // Emit only the parameter relevant to the active acceptance rule.
@@ -790,6 +799,7 @@ fn main() {
                 .map(|writer| &mut **writer as &mut dyn StatsWriter),
             scores_writer.as_mut(),
             show_progress,
+            write_improved_scores_only,
         ),
         AcceptanceConfig::Linear(rule) => multi_tilted_runs_with_writer(
             &graph,
@@ -804,6 +814,7 @@ fn main() {
                 .map(|writer| &mut **writer as &mut dyn StatsWriter),
             scores_writer.as_mut(),
             show_progress,
+            write_improved_scores_only,
         ),
         AcceptanceConfig::Exponential(rule) => multi_tilted_runs_with_writer(
             &graph,
@@ -818,6 +829,7 @@ fn main() {
                 .map(|writer| &mut **writer as &mut dyn StatsWriter),
             scores_writer.as_mut(),
             show_progress,
+            write_improved_scores_only,
         ),
     };
 

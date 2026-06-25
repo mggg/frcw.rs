@@ -12,7 +12,7 @@ use crate::stats::{ScoresWriter, SelfLoopCounts, StatsWriter};
 /// Starts a chain-statistics writer thread.
 ///
 /// Short-bursts emits a full partition on every output record (the runner
-/// already pays the partition clone in both `write_best_only` modes), so the
+/// already pays the partition clone for every accepted step), so the
 /// writer thread receives partitions directly and synthesizes an empty
 /// proposal on each `writer.step` call. Writers that need proposal-level data
 /// (TSV, JSONL, pcompress) will see empty/zeroed proposal fields; prefer the
@@ -65,7 +65,7 @@ pub(super) fn start_burst_stats_writer(
 /// * `writer` - Score writer receiving per-event objective scores.
 /// * `initial_score` - Objective score of the starting partition.
 /// * `initial_district_scores` - Per-district score vector for the starting
-///   partition. Empty switches to the legacy three-column header.
+///   partition. Empty switches to the bare `step,score` header.
 /// * `recv` - Channel receiving asynchronous score write packets.
 pub(super) fn start_burst_score_writer(
     writer: &mut ScoresWriter,
@@ -83,9 +83,7 @@ pub(super) fn start_burst_score_writer(
         if let Some(new_districts) = next.district_scores.take() {
             last_districts = new_districts;
         }
-        writer
-            .step(next.step, next.score, &last_districts)
-            .unwrap();
+        writer.step(next.step, next.score, &last_districts).unwrap();
         writer.flush().unwrap();
         next = recv.recv().unwrap();
     }

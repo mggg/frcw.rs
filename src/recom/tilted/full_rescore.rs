@@ -14,11 +14,7 @@ use crate::partition::Partition;
 
 /// Stores the current state of the two affected districts so the caller can
 /// restore them after a temp-apply / score / revert cycle.
-fn save_revert_buffer(
-    partition: &Partition,
-    proposal: &RecomProposal,
-    revert: &mut RecomProposal,
-) {
+fn save_revert_buffer(partition: &Partition, proposal: &RecomProposal, revert: &mut RecomProposal) {
     revert.a_label = proposal.a_label;
     revert.b_label = proposal.b_label;
     revert.a_pop = partition.dist_pops[proposal.a_label];

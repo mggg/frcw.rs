@@ -29,7 +29,12 @@ fn temp_path(tag: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    path.push(format!("frcw_ben_{}_{}_{}.ben", tag, std::process::id(), ts));
+    path.push(format!(
+        "frcw_ben_{}_{}_{}.ben",
+        tag,
+        std::process::id(),
+        ts
+    ));
     path
 }
 
