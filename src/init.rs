@@ -388,6 +388,7 @@ pub fn graph_from_networkx_value(
         attr: attr,
         edge_attr: edge_attr,
         int_attr: std::collections::HashMap::new(),
+        float_attr: std::collections::HashMap::new(),
     };
     return Ok((graph, data));
 }

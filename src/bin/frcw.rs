@@ -6,8 +6,9 @@ static GLOBAL: MiMalloc = MiMalloc;
 use clap::{value_parser, Arg, ArgAction, Command};
 use frcw::bendl::{reorder_graph_json, BendlGraphOrder};
 use frcw::config::parse_region_weights_config;
+use frcw::constraints::{make_constraint, ConstraintConfig};
 use frcw::init::{from_networkx, from_networkx_value};
-use frcw::recom::run::multi_chain;
+use frcw::recom::run::multi_chain_with_constraint;
 use frcw::recom::{RecomParams, RecomVariant};
 use frcw::stats::{
     AssignmentsOnlyWriter, BenWriter, BendlBenStreamWriter, CanonicalWriter, JSONLWriter,
@@ -55,6 +56,15 @@ fn bendl_output_file(path: &str, overwrite_output: bool) -> BufWriter<fs::File> 
         .open(p)
         .unwrap_or_else(|e| panic!("Could not open output file {}: {}", path, e));
     BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, file)
+}
+
+fn load_json_arg(arg: &str) -> String {
+    if arg.trim_start().starts_with('{') {
+        arg.to_string()
+    } else {
+        fs::read_to_string(arg)
+            .unwrap_or_else(|e| panic!("Could not read JSON config '{}': {}", arg, e))
+    }
 }
 
 fn main() {
@@ -183,6 +193,12 @@ fn main() {
                     .num_args(1..)
                     .default_value(None)
                     .help("Additional columns in the graph metadata to sum over districts."),
+            )
+            .arg(
+                Arg::new("constraint")
+                    .long("constraint")
+                    .required(false)
+                    .help("Constraint config as inline JSON or a path to a JSON file."),
             )
             .arg(
                 Arg::new("region_weights")
@@ -327,6 +343,13 @@ fn main() {
         .collect();
     let region_weights_raw = (*matches.get_one::<String>("region_weights").unwrap()).as_str();
     let region_weights = parse_region_weights_config(region_weights_raw);
+    let constraint_json = matches
+        .get_one::<String>("constraint")
+        .map(|arg| load_json_arg(arg));
+    let constraint = constraint_json
+        .as_deref()
+        .map(make_constraint)
+        .unwrap_or(ConstraintConfig::None);
 
     // When region weights are supplied, transparently upgrade the RMST/cut-edges
     // variants to their region-aware counterparts so the weights actually take
@@ -403,11 +426,22 @@ fn main() {
             }
         }
     }
+    // Constraint columns must live in `graph.attr` so `cache_graph_cols` can parse
+    // them into `graph.float_attr`. Columns the user did not also list in `sum_cols`
+    // are constraint-only: load them, but drop them from `graph.attr` after caching
+    // (below) so the integer district-sum machinery never tries to sum a fractional
+    // share column (`parse_as_int` panics on e.g. "0.25").
+    let constraint_only: Vec<String> = constraint
+        .required_node_cols()
+        .into_iter()
+        .filter(|col| !sum_cols.contains(col))
+        .collect();
+    sum_cols.extend(constraint_only.iter().cloned());
 
     // Load the graph and partition and compute graph provenance. The bendl arm
     // reorders the JSON in memory and builds the chain from the exact bytes it
     // will embed, so the run and the embedded Graph asset can never diverge.
-    let (graph, partition, embed_bytes, source_graph_sha3, embedded_graph_sha3) = if is_bendl {
+    let (mut graph, partition, embed_bytes, source_graph_sha3, embedded_graph_sha3) = if is_bendl {
         let source_bytes = fs::read(&graph_json)
             .unwrap_or_else(|e| panic!("Could not read graph file {}: {}", graph_json, e));
         let source_sha3 = sha3_hex(&source_bytes);
@@ -463,6 +497,10 @@ fn main() {
             None,
         )
     };
+    constraint.cache_graph_cols(&mut graph);
+    for col in &constraint_only {
+        graph.attr.remove(col);
+    }
 
     let target_pop = match target_pop_opt {
         Some(p) => p as f64,
@@ -514,6 +552,11 @@ fn main() {
         meta.as_object_mut()
             .unwrap()
             .insert("region_weights".to_string(), json!(region_weights));
+    }
+    if let Some(config) = &constraint_json {
+        meta.as_object_mut()
+            .unwrap()
+            .insert("constraint".to_string(), json!(config));
     }
     // For BENDL the original-file hash no longer verifies the (possibly
     // reordered) embedded asset, so replace `graph_sha3` with explicit
@@ -583,7 +626,7 @@ fn main() {
 
     let show_progress = matches.get_flag("show-progress");
 
-    let output = multi_chain(
+    let output = multi_chain_with_constraint(
         &graph,
         &partition,
         writer,
@@ -591,6 +634,7 @@ fn main() {
         n_threads,
         batch_size,
         show_progress,
+        constraint,
     );
     match output {
         Ok(_) => {}

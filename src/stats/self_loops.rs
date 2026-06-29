@@ -17,6 +17,8 @@ pub enum SelfLoopReason {
     /// Probabilistic rejection based on objective score
     /// (tilted runs only).
     TiltedRejection,
+    /// Constraint violation (e.g., compactness, population, etc.).
+    ConstraintViolation,
 }
 
 /// Self-loop statistics since the last accepted proposal.
@@ -104,6 +106,7 @@ impl Serialize for SelfLoopCounts {
                 SelfLoopReason::NoSplit => "no_split",
                 SelfLoopReason::SeamLength => "seam_length",
                 SelfLoopReason::TiltedRejection => "tilted_rejection",
+                SelfLoopReason::ConstraintViolation => "constraint_violation",
             };
             state.serialize_field(key, count)?;
         }

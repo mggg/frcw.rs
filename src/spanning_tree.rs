@@ -419,6 +419,7 @@ mod tests {
             attr: HashMap::new(),
             edge_attr,
             int_attr: HashMap::new(),
+            float_attr: HashMap::new(),
         }
     }
 
@@ -488,6 +489,7 @@ mod tests {
             attr: HashMap::new(),
             edge_attr,
             int_attr: HashMap::new(),
+            float_attr: HashMap::new(),
         };
         let subgraph = triangle([0.0, 0.0, 0.0]); // subgraph carries no edge attrs in production
         let raw_nodes = vec![1usize, 2, 3];

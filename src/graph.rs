@@ -56,6 +56,10 @@ pub struct Graph {
     /// parsing on the hot path. Only populated for columns explicitly
     /// registered via [`Graph::cache_int_col`].
     pub int_attr: HashMap<String, Vec<i32>>,
+    /// Pre-parsed float node attributes, cached to avoid repeated string
+    /// parsing on the hot path. Only populated for columns explicitly
+    /// registered via [`Graph::cache_float_col`].
+    pub float_attr: HashMap<String, Vec<f64>>,
 }
 
 impl Graph {
@@ -71,6 +75,7 @@ impl Graph {
             attr: HashMap::new(),
             edge_attr: HashMap::new(),
             int_attr: HashMap::new(),
+            float_attr: HashMap::new(),
         }
     }
 
@@ -103,6 +108,30 @@ impl Graph {
             })
             .collect();
         self.int_attr.insert(col.to_string(), parsed);
+    }
+
+    /// Parses a float-valued node attribute column from `attr` and caches
+    /// the result in `float_attr`.
+    ///
+    /// Panics if `col` is absent from `attr`, or if any value cannot
+    /// be represented as an `f64`, naming the column and node index.
+    pub fn cache_float_col(&mut self, col: &str) {
+        let parsed: Vec<f64> = self
+            .attr
+            .get(col)
+            .unwrap_or_else(|| panic!("Missing node attribute '{}'", col))
+            .iter()
+            .enumerate()
+            .map(|(n, val)| {
+                val.parse::<f64>().unwrap_or_else(|_| {
+                    panic!(
+                        "Could not parse value '{}' as float for column '{}' at node {}",
+                        val, col, n
+                    )
+                })
+            })
+            .collect();
+        self.float_attr.insert(col.to_string(), parsed);
     }
 
     /// Initializes a graph from a newline-delimited edge list format representation.
@@ -214,6 +243,7 @@ impl Graph {
             attr: HashMap::new(),
             edge_attr: HashMap::new(),
             int_attr: HashMap::new(),
+            float_attr: HashMap::new(),
         })
     }
 
@@ -259,6 +289,7 @@ impl Graph {
             attr: HashMap::new(),
             edge_attr: HashMap::new(),
             int_attr: HashMap::new(),
+            float_attr: HashMap::new(),
         }
     }
 
