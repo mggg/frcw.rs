@@ -565,13 +565,6 @@ fn test_tilted_canonical_writer_mixed_ending_counts(
         .map(|r| r["sample"].as_u64().unwrap())
         .collect();
     let expected: Vec<u64> = (1..=params.num_steps).collect();
-    let expected = if samples.first().copied() == Some(1) && samples.get(1).copied() == Some(1) {
-        let mut v = vec![1u64];
-        v.extend(1..=(params.num_steps - 1));
-        v
-    } else {
-        expected
-    };
     assert_eq!(
         samples, expected,
         "sample numbers not contiguous (n_threads={}, accept_worse_prob={}, seed={})",
@@ -633,7 +626,7 @@ fn test_tilted_canonical_writer_flushes_terminal_self_loops() {
     assert_eq!(records.len(), params.num_steps as usize);
     assert_eq!(
         records.last().unwrap()["sample"].as_u64().unwrap(),
-        params.num_steps - 1
+        params.num_steps
     );
     let final_assignment = final_partition
         .assignments
