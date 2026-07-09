@@ -296,7 +296,7 @@ where
     let progress_bar = if show_progress {
         let pb = ProgressBar::with_draw_target(
             Some(params.num_steps),
-            indicatif::ProgressDrawTarget::stdout_with_hz(1),
+            indicatif::ProgressDrawTarget::stderr_with_hz(1),
         );
         pb.set_style(
             ProgressStyle::with_template(
