@@ -105,7 +105,7 @@ fn make_stats_writer(
 
 fn main() {
     let cli = Command::new("frcw_tilted")
-        .version("0.1.3")
+        .version(env!("CARGO_PKG_VERSION"))
         .author("Peter Rock <peter@mggg.org>")
         .about("A tilted run optimizer for redistricting")
         .arg(

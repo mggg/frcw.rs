@@ -16,7 +16,7 @@ use std::io::{self, BufRead};
 
 fn main() {
     let cli = Command::new("gerryql")
-        .version("0.1.3")
+        .version(env!("CARGO_PKG_VERSION"))
         .author("Parker J. Rule <parker.rule@tufts.edu>")
         .about("A query engine for statistics on long Markov chain runs.")
         .arg(

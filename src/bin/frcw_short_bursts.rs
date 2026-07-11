@@ -102,7 +102,7 @@ fn make_stats_writer(
 
 fn main() {
     let cli = Command::new("frcw_short_bursts")
-        .version("0.1.3")
+        .version(env!("CARGO_PKG_VERSION"))
         .author("Parker J. Rule <parker.rule@tufts.edu>")
         .about("A short bursts optimizer for redistricting")
         .arg(

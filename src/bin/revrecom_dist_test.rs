@@ -16,7 +16,7 @@ use std::fs::read_to_string;
 
 fn main() {
     let matches = Command::new("frcw-revrecom-dist-test")
-        .version("0.1.3")
+        .version(env!("CARGO_PKG_VERSION"))
         .author("Parker J. Rule <parker.rule@tufts.edu>")
         .about("RevReCom distribution tests for frcw")
         .arg(

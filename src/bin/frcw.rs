@@ -70,7 +70,7 @@ fn load_json_arg(arg: &str) -> String {
 fn main() {
     let mut cli =
         Command::new("frcw")
-            .version("0.1.3")
+            .version(env!("CARGO_PKG_VERSION"))
             .author("Parker J. Rule <parker.rule@tufts.edu>")
             .about("A minimal implementation of the ReCom Markov chain")
             .arg(
