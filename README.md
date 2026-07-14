@@ -20,7 +20,7 @@ Running a 1,000,000-step reversible ReCom chain with [Virginia precinct data](ht
                       --pop-col TOTPOP \
                       --rng-seed 94915664 \
                       --tol 0.01 \
-                      --batch-size 64 \ 
+                      --batch-size 64 \
                       --variant reversible \
                       --balance-ub 30 \
                       --sum-cols G16DPRS G16RPRS G16DHOR G16RHOR G18DSEN G18RSEN > va_revrecom.jsonl
@@ -39,7 +39,7 @@ Running a 100,000-step [GerryChain](https://github.com/mggg/gerrychain)-like ReC
                       --pop-col TOTPOP \
                       --rng-seed 94915664 \
                       --tol 0.01 \
-                      --batch-size 1 \ 
+                      --batch-size 1 \
                       --variant cut-edges-ust \
                       --sum-cols G16DPRS G16RPRS G16DHOR G16RHOR G18DSEN G18RSEN > va_recom.jsonl
 ```
