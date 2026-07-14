@@ -38,3 +38,8 @@ fn run_frcw(extra_args: &[&str]) -> Vec<u8> {
 fn show_progress_does_not_change_stdout() {
     assert_eq!(run_frcw(&[]), run_frcw(&["--show-progress"]));
 }
+
+#[test]
+fn empty_constraint_does_not_change_stdout() {
+    assert_eq!(run_frcw(&[]), run_frcw(&["--constraint", ""]));
+}

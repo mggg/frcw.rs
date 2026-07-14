@@ -345,6 +345,7 @@ fn main() {
     let region_weights = parse_region_weights_config(region_weights_raw);
     let constraint_json = matches
         .get_one::<String>("constraint")
+        .filter(|arg| !arg.is_empty())
         .map(|arg| load_json_arg(arg));
     let constraint = constraint_json
         .as_deref()
