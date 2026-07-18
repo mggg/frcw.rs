@@ -96,6 +96,11 @@ pub struct AssignmentsOnlyWriter {
 pub struct CanonicalWriter {
     /// The previous assignment vector. Used to fill in self loops.
     previous_assignment: Vec<u32>,
+    /// The last chain step number that has been written. The chain is
+    /// 0-indexed (seed at step 0); the writer stamps `sample = step + 1`
+    /// so output line count and terminal sample number both equal
+    /// `num_steps` under the runner contract.
+    last_step: u64,
     /// The output stream that we would like to write to.
     output: Box<dyn Write + Send>,
 }
@@ -306,8 +311,22 @@ impl CanonicalWriter {
     pub fn new(output: Box<dyn Write + Send>) -> CanonicalWriter {
         CanonicalWriter {
             previous_assignment: Vec::new(),
+            last_step: 0,
             output: output,
         }
+    }
+
+    fn write_sample(&mut self, chain_step: u64, assignment: &[u32]) -> Result<()> {
+        self.output.write_all(
+            format!(
+                "{}\n",
+                json!({
+                    "assignment": assignment,
+                    "sample": chain_step + 1,
+                })
+            )
+            .as_bytes(),
+        )
     }
 }
 
@@ -606,18 +625,9 @@ impl StatsWriter for AssignmentsOnlyWriter {
 impl StatsWriter for CanonicalWriter {
     fn init(&mut self, _graph: &Graph, partition: &Partition) -> Result<()> {
         self.previous_assignment = partition.assignments.clone();
-        self.output
-            .write_all(
-                format!(
-                    "{}\n",
-                    json!({
-                        "assignment": self.previous_assignment,
-                        "sample": 1,
-                    })
-                )
-                .as_bytes(),
-            )
-            .expect("Failed to write to output");
+        let assignment = self.previous_assignment.clone();
+        self.write_sample(0, &assignment)?;
+        self.last_step = 0;
         Ok(())
     }
 
@@ -629,34 +639,15 @@ impl StatsWriter for CanonicalWriter {
         _proposal: &RecomProposal,
         counts: &SelfLoopCounts,
     ) -> Result<()> {
-        let tot_count = counts.sum();
-        for i in step - tot_count as u64..step {
-            self.output
-                .write_all(
-                    format!(
-                        "{}\n",
-                        json!({
-                            "assignment": self.previous_assignment,
-                            "sample": i,
-                        })
-                    )
-                    .as_bytes(),
-                )
-                .expect("Failed to write to output");
+        debug_assert_eq!(step, self.last_step + counts.sum() as u64 + 1);
+        let previous_assignment = self.previous_assignment.clone();
+        for self_loop_step in self.last_step + 1..step {
+            self.write_sample(self_loop_step, &previous_assignment)?;
         }
         self.previous_assignment = partition.assignments.clone();
-        self.output
-            .write_all(
-                format!(
-                    "{}\n",
-                    json!({
-                        "assignment": self.previous_assignment,
-                        "sample": step,
-                    })
-                )
-                .as_bytes(),
-            )
-            .expect("Failed to write to output");
+        let assignment = self.previous_assignment.clone();
+        self.write_sample(step, &assignment)?;
+        self.last_step = step;
         Ok(())
     }
 
@@ -667,21 +658,12 @@ impl StatsWriter for CanonicalWriter {
         _partition: &Partition,
         counts: &SelfLoopCounts,
     ) -> Result<()> {
-        let tot_count = counts.sum();
-        for i in step - tot_count as u64 + 1..step + 1 {
-            self.output
-                .write_all(
-                    format!(
-                        "{}\n",
-                        json!({
-                            "assignment": self.previous_assignment,
-                            "sample": i,
-                        })
-                    )
-                    .as_bytes(),
-                )
-                .expect("Failed to write to output");
+        debug_assert_eq!(step, self.last_step + counts.sum() as u64);
+        let previous_assignment = self.previous_assignment.clone();
+        for self_loop_step in self.last_step + 1..=step {
+            self.write_sample(self_loop_step, &previous_assignment)?;
         }
+        self.last_step = step;
         Ok(())
     }
 
