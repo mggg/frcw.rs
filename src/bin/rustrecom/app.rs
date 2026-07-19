@@ -46,6 +46,26 @@ fn with_default_subcommand(mut args: Vec<OsString>) -> Vec<OsString> {
     args
 }
 
+/// Forces `subcommand` after the program name for the deprecated optimizer
+/// binary names, which never took a subcommand token. A leading `-V`/`--version`
+/// stays top-level so the shim reports its own name and version exactly like
+/// the old standalone binary did.
+fn with_forced_subcommand(mut args: Vec<OsString>, subcommand: &str) -> Vec<OsString> {
+    let version_only = matches!(args.get(1), Some(first) if first == "-V" || first == "--version");
+    if !version_only {
+        args.insert(1, OsString::from(subcommand));
+    }
+    args
+}
+
+fn deprecation_warning(old: &str, replacement: &str) {
+    eprintln!(
+        "warning: the `{}` binary is deprecated and will be removed in a future release; \
+         use `{}` instead",
+        old, replacement
+    );
+}
+
 fn cli() -> Command {
     Command::new(invoked_name())
         .version(env!("CARGO_PKG_VERSION"))
@@ -58,7 +78,25 @@ fn cli() -> Command {
 }
 
 pub fn main() {
-    let args = with_default_subcommand(std::env::args_os().collect());
+    let raw_args: Vec<OsString> = std::env::args_os().collect();
+    // Pre-rename entry points keep working but warn and forward: `frcw` is the
+    // old unified name, and the standalone optimizer binaries map onto their
+    // subcommands.
+    let args = match invoked_name().as_str() {
+        "frcw" => {
+            deprecation_warning("frcw", "rustrecom");
+            with_default_subcommand(raw_args)
+        }
+        "frcw_short_bursts" => {
+            deprecation_warning("frcw_short_bursts", "rustrecom short-bursts");
+            with_forced_subcommand(raw_args, "short-bursts")
+        }
+        "frcw_tilted" => {
+            deprecation_warning("frcw_tilted", "rustrecom tilted");
+            with_forced_subcommand(raw_args, "tilted")
+        }
+        _ => with_default_subcommand(raw_args),
+    };
     let matches = cli().get_matches_from(args);
     // Engine and runtime errors surface here and exit nonzero; parameter
     // validation failures inside each command still panic with their original

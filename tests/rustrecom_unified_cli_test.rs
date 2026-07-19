@@ -211,6 +211,81 @@ fn alias_output_matches_primary_binary_output() {
     assert_eq!(primary.stdout, alias.stdout);
 }
 
+// --- Deprecated binary-name shims -----------------------------------------
+
+#[test]
+fn frcw_warns_about_deprecation_but_rustrecom_does_not() {
+    let alias = frcw(&["--version"]);
+    assert!(alias.status.success());
+    let alias_stderr = String::from_utf8_lossy(&alias.stderr);
+    assert!(
+        alias_stderr.contains("`frcw` binary is deprecated")
+            && alias_stderr.contains("use `rustrecom` instead"),
+        "stderr:\n{}",
+        alias_stderr
+    );
+    let primary = rustrecom(&["--version"]);
+    assert!(
+        primary.stderr.is_empty(),
+        "the primary name must not warn:\n{}",
+        String::from_utf8_lossy(&primary.stderr)
+    );
+}
+
+#[test]
+fn frcw_short_bursts_shim_forwards_legacy_invocations_and_warns() {
+    let scores_path = temp_path("legacy_sb_shim", "csv");
+    // Old-style argument list: no subcommand token.
+    let args = short_bursts_args(&scores_path);
+    let output = Command::new(env!("CARGO_BIN_EXE_frcw_short_bursts"))
+        .args(&args[1..])
+        .output()
+        .expect("run frcw_short_bursts shim");
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("`frcw_short_bursts` binary is deprecated")
+            && stderr.contains("use `rustrecom short-bursts` instead"),
+        "stderr:\n{}",
+        stderr
+    );
+    let meta_path = metadata_path(&scores_path);
+    let meta: Value = serde_json::from_str(fs::read_to_string(&meta_path).unwrap().trim()).unwrap();
+    assert_eq!(meta["meta"]["type"], "short_bursts");
+
+    fs::remove_file(&scores_path).ok();
+    fs::remove_file(&meta_path).ok();
+}
+
+#[test]
+fn frcw_tilted_shim_forwards_help_and_keeps_top_level_version() {
+    let shim = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_frcw_tilted"))
+            .args(args)
+            .output()
+            .expect("run frcw_tilted shim")
+    };
+    let help = shim(&["--help"]);
+    assert!(help.status.success());
+    let help_stdout = String::from_utf8_lossy(&help.stdout);
+    assert!(
+        help_stdout.contains("--accept-rule"),
+        "--help must show the tilted options:\n{}",
+        help_stdout
+    );
+    assert!(String::from_utf8_lossy(&help.stderr).contains("use `rustrecom tilted` instead"));
+
+    // A bare `--version` stays top-level, matching the old binary's output.
+    let version = shim(&["--version"]);
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout)
+        .contains(&format!("frcw_tilted {}", env!("CARGO_PKG_VERSION"))));
+}
+
 // --- Short-bursts coverage ------------------------------------------------
 
 #[test]

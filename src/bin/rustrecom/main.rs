@@ -3,8 +3,8 @@
 //! (`src/bin/frcw.rs`) so existing scripts keep working.
 //!
 //! A bare `rustrecom --graph-json ...` invocation (no subcommand) still runs
-//! the chain so GerryChain.jl, README examples, and existing scripts keep
-//! working; see `app::with_default_subcommand`.
+//! the chain so gerrytools' mgrp runner, README examples, and existing
+//! scripts keep working; see `app::with_default_subcommand`.
 
 mod app;
 mod chain;
