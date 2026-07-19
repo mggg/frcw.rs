@@ -139,20 +139,22 @@ pub fn canonicalize_graph_path(graph_path: &str) -> String {
     }
 }
 
-/// Parse `--bendl-graph-order` and enforce the bendl flag pairing rules shared
-/// by all commands. Returns `(is_bendl, bendl_order)`.
-pub fn resolve_bendl_options(matches: &ArgMatches, writer_str: &str) -> (bool, BendlGraphOrder) {
+/// Parse the bendl graph order and enforce the bendl flag pairing rules shared
+/// by all commands. Takes resolved values rather than `ArgMatches` because
+/// chain's config mode sources them from the config document, not the CLI.
+/// Returns `(is_bendl, bendl_order)`.
+pub fn resolve_bendl_options(
+    writer_str: &str,
+    bendl_graph_order: &str,
+    has_output_file: bool,
+) -> (bool, BendlGraphOrder) {
     let is_bendl = writer_str == "bendl";
-    let bendl_order = BendlGraphOrder::parse(
-        matches
-            .get_one::<String>("bendl_graph_order")
-            .expect("bendl_graph_order has a default value"),
-    )
-    .unwrap_or_else(|e| panic!("Parameter error: {}", e));
+    let bendl_order = BendlGraphOrder::parse(bendl_graph_order)
+        .unwrap_or_else(|e| panic!("Parameter error: {}", e));
     if !bendl_order.is_none() && !is_bendl {
         panic!("Parameter error: '--bendl-graph-order' is only valid with '--writer bendl'.");
     }
-    if is_bendl && matches.get_one::<String>("output-file").is_none() {
+    if is_bendl && !has_output_file {
         panic!(
             "Parameter error: '--writer bendl' requires '--output-file' \
              (BENDL needs a seekable file and cannot stream to stdout)."

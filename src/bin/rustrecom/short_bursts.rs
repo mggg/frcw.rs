@@ -113,7 +113,13 @@ pub fn run(matches: &ArgMatches) -> Result<(), String> {
 
     // BENDL needs a seekable file and embeds its provenance in the bundle's
     // Metadata asset, so the separate _metadata.jsonl sidecar is suppressed.
-    let (is_bendl, bendl_order) = common::resolve_bendl_options(matches, writer_str);
+    let (is_bendl, bendl_order) = common::resolve_bendl_options(
+        writer_str,
+        matches
+            .get_one::<String>("bendl_graph_order")
+            .expect("bendl_graph_order has a default value"),
+        matches.get_one::<String>("output-file").is_some(),
+    );
     let metadata_path = common::plan_optimizer_output_paths(matches, is_bendl, overwrite_output);
 
     if tol < 0.0 || tol > 1.0 {

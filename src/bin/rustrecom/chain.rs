@@ -1,37 +1,60 @@
 //! The `chain` subcommand: a minimal implementation of the ReCom Markov chain
 //! (formerly the bare `frcw` binary).
+//!
+//! Arguments arrive either from CLI flags or, via `--config`, from a versioned JSON
+//! config whose fields mirror those flags. The two sources resolve into one
+//! [`ResolvedChainArgs`] so the run path is identical; config mode additionally
+//! preserves the exact raw config string as provenance (primary metadata record,
+//! BENDL Metadata asset, or a `<stem>_metadata.jsonl` sidecar).
 
 use crate::common;
-use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
-use frcw::constraints::{make_constraint, ConstraintConfig};
+use clap::{parser::ValueSource, value_parser, Arg, ArgAction, ArgMatches, Command};
+use frcw::config::{parse_chain_config, region_weights_from_map, LoadedChainConfig};
+use frcw::constraints::{make_constraint, make_constraint_value, ConstraintConfig};
 use frcw::recom::run::multi_chain_with_constraint;
 use frcw::recom::{RecomParams, RecomVariant};
 use frcw::stats::{BendlBenStreamWriter, StatsWriter};
 use serde_json::json;
-use std::io;
+use std::fs;
+use std::io::{self, Write};
+
+/// Marks an argument as required only in CLI mode; config mode supplies it
+/// from the config document instead.
+fn config_optional(arg: Arg) -> Arg {
+    arg.required(false).required_unless_present("config")
+}
 
 pub fn command() -> Command {
     let mut cli =
         Command::new("chain")
             .about("A minimal implementation of the ReCom Markov chain")
-            .arg(common::graph_json_arg())
             .arg(
+                Arg::new("config")
+                    .long("config")
+                    .value_parser(value_parser!(String))
+                    .help(
+                        "Run from a versioned JSON config whose fields mirror the CLI \
+                        arguments. Either a JSON string (must start with '{'), a path \
+                        to a JSON file, or '-' to read the JSON from stdin.",
+                    ),
+            )
+            .arg(config_optional(common::graph_json_arg()))
+            .arg(config_optional(
                 Arg::new("n_steps")
                     .long("n-steps")
-                    .required(true)
                     .value_parser(value_parser!(u64))
                     .help("The number of proposals to generate."),
-            )
+            ))
             .arg(
                 Arg::new("target_pop")
                     .long("target-pop")
                     .value_parser(value_parser!(u64))
                     .help("The target population for the districts."),
             )
-            .arg(common::tol_arg())
-            .arg(common::pop_col_arg())
-            .arg(common::assignment_col_arg())
-            .arg(common::rng_seed_arg())
+            .arg(config_optional(common::tol_arg()))
+            .arg(config_optional(common::pop_col_arg()))
+            .arg(config_optional(common::assignment_col_arg()))
+            .arg(config_optional(common::rng_seed_arg()))
             .arg(
                 Arg::new("balance_ub")
                     .long("balance-ub")
@@ -49,10 +72,9 @@ pub fn command() -> Command {
                     .default_value("1")
                     .help("The number of proposals per batch job."),
             )
-            .arg(
+            .arg(config_optional(
                 Arg::new("variant")
                     .long("variant")
-                    .required(true)
                     .value_parser(value_parser!(String))
                     .help(
                         "The ReCom variant to use. The options are\n\
@@ -64,7 +86,7 @@ pub fn command() -> Command {
                 \tdistrict-pairs-region-aware (Recom-BW)\n\
                 \treversible (RevReCom)",
                     ),
-            )
+            ))
             .arg(
                 Arg::new("writer")
                     .long("writer")
@@ -123,74 +145,228 @@ pub fn command() -> Command {
     cli
 }
 
+/// Arguments that may accompany `--config`. `overwrite-output` is output-lifecycle
+/// policy rather than a sampler value: it has no v1 config field, and wrappers
+/// driving config mode need it to keep the clobbering behavior of the shell
+/// redirects it replaces.
+const CONFIG_MODE_COMPANION_ARGS: &[&str] = &["config", "overwrite-output"];
+
+/// Reject config mode combined with any explicitly supplied CLI argument.
+///
+/// The argument set is read back off the parsed `ArgMatches` rather than listed here,
+/// so a newly added CLI option is covered without touching this function. `value_source`
+/// distinguishes a value the user typed from one clap supplied as a default, which a
+/// raw argv scan or a `get_one` check cannot do.
+fn reject_mixed_config_args(matches: &ArgMatches) {
+    let mut mixed = matches
+        .ids()
+        .map(|id| id.as_str())
+        .filter(|id| !CONFIG_MODE_COMPANION_ARGS.contains(id))
+        .filter(|id| matches.value_source(id) == Some(ValueSource::CommandLine))
+        .collect::<Vec<_>>();
+    mixed.sort_unstable();
+    if !mixed.is_empty() {
+        panic!(
+            "--config cannot be combined with CLI arguments: {}",
+            mixed.join(", ")
+        );
+    }
+}
+
+struct ResolvedChainArgs {
+    graph_path: String,
+    n_steps: u64,
+    target_pop: Option<u64>,
+    tol: f64,
+    pop_col: String,
+    assignment_col: String,
+    rng_seed: u64,
+    balance_ub: u32,
+    n_threads: usize,
+    batch_size: usize,
+    variant: String,
+    writer: String,
+    sum_cols: Vec<String>,
+    constraint: ConstraintConfig,
+    cli_constraint_json: Option<String>,
+    region_weights: Option<Vec<(String, f64)>>,
+    edge_weight_keys: Vec<String>,
+    cut_edges_count: bool,
+    output_file: Option<String>,
+    bendl_graph_order: String,
+    show_progress: bool,
+    st_counts: bool,
+    raw_config: Option<String>,
+}
+
+impl ResolvedChainArgs {
+    fn from_cli(matches: &ArgMatches) -> Self {
+        let region_weights_raw = matches
+            .get_one::<String>("region_weights")
+            .expect("region_weights has a default value");
+        let cli_constraint_json = matches
+            .get_one::<String>("constraint")
+            .filter(|arg| !arg.is_empty())
+            .map(|arg| common::load_json_arg(arg, "JSON config"));
+        let constraint = cli_constraint_json
+            .as_deref()
+            .map(make_constraint)
+            .unwrap_or(ConstraintConfig::None);
+
+        Self {
+            graph_path: matches
+                .get_one::<String>("graph_json")
+                .expect("graph_json is required")
+                .clone(),
+            n_steps: *matches
+                .get_one::<u64>("n_steps")
+                .expect("n_steps is required"),
+            target_pop: matches.get_one::<u64>("target_pop").copied(),
+            tol: *matches.get_one::<f64>("tol").expect("tol is required"),
+            pop_col: matches
+                .get_one::<String>("pop_col")
+                .expect("pop_col is required")
+                .clone(),
+            assignment_col: matches
+                .get_one::<String>("assignment_col")
+                .expect("assignment_col is required")
+                .clone(),
+            rng_seed: *matches
+                .get_one::<u64>("rng_seed")
+                .expect("rng_seed is required"),
+            balance_ub: *matches
+                .get_one::<u32>("balance_ub")
+                .expect("balance_ub has a default value"),
+            n_threads: *matches
+                .get_one::<usize>("n_threads")
+                .expect("n_threads has a default value"),
+            batch_size: *matches
+                .get_one::<usize>("batch_size")
+                .expect("batch_size has a default value"),
+            variant: matches
+                .get_one::<String>("variant")
+                .expect("variant is required")
+                .clone(),
+            writer: matches
+                .get_one::<String>("writer")
+                .expect("writer has a default value")
+                .clone(),
+            sum_cols: matches
+                .get_many::<String>("sum_cols")
+                .unwrap_or_default()
+                .cloned()
+                .collect(),
+            constraint,
+            cli_constraint_json,
+            region_weights: frcw::config::parse_region_weights_config(region_weights_raw),
+            edge_weight_keys: matches
+                .get_many::<String>("edge_weight_keys")
+                .unwrap_or_default()
+                .cloned()
+                .collect(),
+            cut_edges_count: matches.get_flag("cut_edges_count"),
+            output_file: matches.get_one::<String>("output-file").cloned(),
+            bendl_graph_order: matches
+                .get_one::<String>("bendl_graph_order")
+                .expect("bendl_graph_order has a default value")
+                .clone(),
+            show_progress: matches.get_flag("show-progress"),
+            st_counts: if cfg!(feature = "linalg") {
+                matches.get_flag("spanning_tree_counts")
+            } else {
+                false
+            },
+            raw_config: None,
+        }
+    }
+
+    fn from_config(loaded: LoadedChainConfig) -> Self {
+        let document = loaded.document;
+        let constraint = document
+            .constraint
+            .as_ref()
+            .map(make_constraint_value)
+            .unwrap_or(ConstraintConfig::None);
+        let region_weights = region_weights_from_map(&document.region_weights);
+
+        Self {
+            graph_path: document.graph_json,
+            n_steps: document.n_steps,
+            target_pop: document.target_pop,
+            tol: document.tol,
+            pop_col: document.pop_col,
+            assignment_col: document.assignment_col,
+            rng_seed: document.rng_seed,
+            balance_ub: document.balance_ub,
+            n_threads: document.n_threads,
+            batch_size: document.batch_size,
+            variant: document.variant,
+            writer: document.writer,
+            sum_cols: document.sum_cols,
+            constraint,
+            cli_constraint_json: None,
+            region_weights,
+            edge_weight_keys: document.edge_weight_keys,
+            cut_edges_count: document.cut_edges_count,
+            output_file: document.output_file,
+            bendl_graph_order: document.bendl_graph_order,
+            show_progress: document.show_progress,
+            st_counts: false,
+            raw_config: Some(loaded.raw),
+        }
+    }
+}
+
 pub fn run(matches: &ArgMatches) -> Result<(), String> {
-    let n_steps = *matches
-        .get_one::<u64>("n_steps")
-        .expect("n_steps is required");
-    let rng_seed = *matches
-        .get_one::<u64>("rng_seed")
-        .expect("rng_seed is required");
-    let target_pop_opt: Option<u64> = matches.get_one::<u64>("target_pop").copied();
-    let tol = *matches.get_one::<f64>("tol").expect("tol is required");
-    let balance_ub = *matches
-        .get_one::<u32>("balance_ub")
-        .expect("balance_ub has a default value");
-    let n_threads = *matches
-        .get_one::<usize>("n_threads")
-        .expect("n_threads is required");
-    let batch_size = *matches
-        .get_one::<usize>("batch_size")
-        .expect("batch_size is required");
-
-    let graph_path = matches
-        .get_one::<String>("graph_json")
-        .expect("graph_json is required");
-    let graph_json = common::canonicalize_graph_path(graph_path);
-
-    let pop_col = matches
-        .get_one::<String>("pop_col")
-        .expect("pop_col is required")
-        .as_str();
-    let assignment_col = matches
-        .get_one::<String>("assignment_col")
-        .expect("assignment_col is required")
-        .as_str();
-    let variant_str = matches
-        .get_one::<String>("variant")
-        .expect("variant has a default value")
-        .as_str();
-    let writer_str = matches
-        .get_one::<String>("writer")
-        .expect("writer has a default value")
-        .as_str();
     let overwrite_output = matches.get_flag("overwrite-output");
-
-    let st_counts = if cfg!(feature = "linalg") {
-        matches.get_flag("spanning_tree_counts")
+    // Mixed CLI arguments are rejected before anything is loaded.
+    let resolved = if let Some(config_arg) = matches.get_one::<String>("config") {
+        reject_mixed_config_args(matches);
+        let raw = if config_arg == "-" {
+            let mut buffer = String::new();
+            io::Read::read_to_string(&mut io::stdin(), &mut buffer)
+                .unwrap_or_else(|error| panic!("Could not read config from stdin: {error}"));
+            buffer
+        } else {
+            common::load_json_arg(config_arg, "config")
+        };
+        let loaded =
+            parse_chain_config(&raw).unwrap_or_else(|error| panic!("Config error: {error}"));
+        ResolvedChainArgs::from_config(loaded)
     } else {
-        false
+        ResolvedChainArgs::from_cli(matches)
     };
-    let cut_edges_count = matches.get_flag("cut_edges_count");
-    let mut sum_cols: Vec<String> = matches
-        .get_many::<String>("sum_cols")
-        .unwrap_or_default()
-        .map(|c| c.to_string())
-        .collect();
-    let edge_weight_keys: Vec<String> = matches
-        .get_many::<String>("edge_weight_keys")
-        .unwrap_or_default()
-        .map(|c| c.to_string())
-        .collect();
-    let region_weights_raw = (*matches.get_one::<String>("region_weights").unwrap()).as_str();
-    let region_weights = frcw::config::parse_region_weights_config(region_weights_raw);
-    let constraint_json = matches
-        .get_one::<String>("constraint")
-        .filter(|arg| !arg.is_empty())
-        .map(|arg| common::load_json_arg(arg, "JSON config"));
-    let constraint = constraint_json
-        .as_deref()
-        .map(make_constraint)
-        .unwrap_or(ConstraintConfig::None);
+    let ResolvedChainArgs {
+        graph_path,
+        n_steps,
+        target_pop: target_pop_opt,
+        tol,
+        pop_col,
+        assignment_col,
+        rng_seed,
+        balance_ub,
+        n_threads,
+        batch_size,
+        variant,
+        writer,
+        mut sum_cols,
+        constraint,
+        cli_constraint_json,
+        region_weights,
+        edge_weight_keys,
+        cut_edges_count,
+        output_file,
+        bendl_graph_order,
+        show_progress,
+        st_counts,
+        raw_config,
+    } = resolved;
+
+    let graph_json = common::canonicalize_graph_path(&graph_path);
+    let pop_col = pop_col.as_str();
+    let assignment_col = assignment_col.as_str();
+    let variant_str = variant.as_str();
+    let writer_str = writer.as_str();
 
     // When region weights are supplied, transparently upgrade the RMST/cut-edges
     // variants to their region-aware counterparts so the weights actually take
@@ -232,8 +408,23 @@ pub fn run(matches: &ArgMatches) -> Result<(), String> {
     // BENDL needs a seekable file and embeds a possibly-reordered graph, so its
     // arm diverges from the boxed-output path. Validate its flags before doing
     // any work or opening the output file.
-    let (is_bendl, bendl_order) = common::resolve_bendl_options(matches, writer_str);
-    let output_file = matches.get_one::<String>("output-file").cloned();
+    let (is_bendl, bendl_order) =
+        common::resolve_bendl_options(writer_str, &bendl_graph_order, output_file.is_some());
+
+    // Config mode preserves the exact raw config as provenance. Writers with a
+    // primary metadata facility (jsonl records, the BENDL Metadata asset) embed
+    // it there; every other writer gets a `<stem>_metadata.jsonl` sidecar next
+    // to the output file. Check the sidecar path before any file is opened.
+    let metadata_file = if raw_config.is_some()
+        && output_file.is_some()
+        && !matches!(writer_str, "jsonl" | "jsonl-full" | "bendl")
+    {
+        let path = common::metadata_path(output_file.as_ref().unwrap());
+        common::assert_can_write_output(&path, overwrite_output);
+        Some(path)
+    } else {
+        None
+    };
 
     if variant == RecomVariant::Reversible && balance_ub == 0 {
         panic!("For reversible ReCom, specify M > 0.");
@@ -329,7 +520,7 @@ pub fn run(matches: &ArgMatches) -> Result<(), String> {
             .unwrap()
             .insert("region_weights".to_string(), json!(region_weights));
     }
-    if let Some(config) = &constraint_json {
+    if let Some(config) = &cli_constraint_json {
         meta.as_object_mut()
             .unwrap()
             .insert("constraint".to_string(), json!(config));
@@ -342,35 +533,44 @@ pub fn run(matches: &ArgMatches) -> Result<(), String> {
             &bendl_order,
         );
     }
-    if writer_str == "jsonl" || writer_str == "jsonl-full" {
+    // CLI mode keeps printing the metadata record to stdout, which is where
+    // callers that redirect stdout into their output file expect it. Config mode
+    // owns its own output file (there is no redirect to piggyback on), so it
+    // writes the record into the output sink instead; see the writer arm below.
+    if raw_config.is_none() && (writer_str == "jsonl" || writer_str == "jsonl-full") {
         // hotfix for pcompress writing
         // TODO: move this into init
         println!("{}", json!({ "meta": meta }).to_string());
     }
 
-    // Build the output writer. The bendl arm embeds the provenance-enriched
-    // metadata and writes to a concrete seekable file; all others use the boxed
-    // sink (file or stdout).
+    // Build the output writer. Config mode stores the exact environment string
+    // in the primary metadata facility where one exists, otherwise in a sidecar.
     let writer: Box<dyn StatsWriter> = if is_bendl {
         let path = output_file.as_ref().expect("bendl requires --output-file");
         let bundle_file = common::bendl_output_file(path, overwrite_output);
+        let metadata = raw_config
+            .as_ref()
+            .map(|raw| raw.as_bytes().to_vec())
+            .unwrap_or_else(|| meta.to_string().into_bytes());
         Box::new(BendlBenStreamWriter::new(
             bundle_file,
             embed_bytes.expect("bendl computes the embed bytes"),
-            meta.to_string().into_bytes(),
+            metadata,
         ))
     } else {
-        let output_buffer: Box<dyn io::Write + Send> = match &output_file {
+        let mut output_buffer: Box<dyn io::Write + Send> = match &output_file {
             Some(path) => common::output_buffer(path, overwrite_output),
             None => Box::new(io::BufWriter::with_capacity(
                 common::OUTPUT_BUFFER_CAPACITY,
                 std::io::stdout(),
             )),
         };
+        if let (Some(raw), "jsonl" | "jsonl-full") = (&raw_config, writer_str) {
+            let metadata = json!({"meta": {"config": raw}});
+            writeln!(output_buffer, "{metadata}").expect("Could not write metadata record");
+        }
         common::make_stats_writer(writer_str, st_counts, cut_edges_count, output_buffer)
     };
-
-    let show_progress = matches.get_flag("show-progress");
 
     multi_chain_with_constraint(
         &graph,
@@ -381,5 +581,12 @@ pub fn run(matches: &ArgMatches) -> Result<(), String> {
         batch_size,
         show_progress,
         constraint,
-    )
+    )?;
+    // The sidecar is written only after a successful run, so a failed run never
+    // leaves provenance pointing at a missing or truncated output file.
+    if let (Some(path), Some(raw)) = (&metadata_file, &raw_config) {
+        fs::write(path, format!("{raw}\n"))
+            .unwrap_or_else(|error| panic!("Could not write config metadata: {error}"));
+    }
+    Ok(())
 }

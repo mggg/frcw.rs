@@ -223,8 +223,7 @@ impl ChainConstraint for ConstraintConfig {
     }
 }
 
-pub fn make_constraint(config: &str) -> ConstraintConfig {
-    let data: Value = serde_json::from_str(config).unwrap();
+pub fn make_constraint_value(data: &Value) -> ConstraintConfig {
     match data["constraint"]
         .as_str()
         .unwrap_or_else(|| panic!("Missing field 'constraint' in constraint config"))
@@ -253,6 +252,11 @@ pub fn make_constraint(config: &str) -> ConstraintConfig {
             other
         ),
     }
+}
+
+pub fn make_constraint(config: &str) -> ConstraintConfig {
+    let data: Value = serde_json::from_str(config).unwrap();
+    make_constraint_value(&data)
 }
 
 fn sum_cached_float_col(graph: &Graph, col: &str, nodes: &[usize]) -> f64 {
