@@ -3,9 +3,11 @@
 
 use crate::common;
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
-use frcw::objectives::{ensure_derived_perim_column, polsby_popper_autoderive};
-use frcw::recom::short_bursts::{core::REVERSIBLE_UNSUPPORTED, multi_short_bursts_with_writer};
-use frcw::recom::{IncrementalBackend, RecomParams};
+use rustrecom::objectives::{ensure_derived_perim_column, polsby_popper_autoderive};
+use rustrecom::recom::short_bursts::{
+    core::REVERSIBLE_UNSUPPORTED, multi_short_bursts_with_writer,
+};
+use rustrecom::recom::{IncrementalBackend, RecomParams};
 use serde_json::json;
 
 pub fn command() -> Command {
@@ -256,7 +258,7 @@ pub fn run(matches: &ArgMatches) -> Result<(), String> {
         writers
             .stats
             .as_mut()
-            .map(|writer| &mut **writer as &mut dyn frcw::stats::StatsWriter),
+            .map(|writer| &mut **writer as &mut dyn rustrecom::stats::StatsWriter),
         writers.scores.as_mut(),
         show_progress,
         write_improved_scores_only,

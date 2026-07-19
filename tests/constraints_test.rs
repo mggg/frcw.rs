@@ -1,10 +1,10 @@
-use frcw::constraints::{make_constraint, ChainConstraint, ConstraintConfig};
-use frcw::graph::Graph;
-use frcw::partition::Partition;
-use frcw::recom::run::multi_chain_with_constraint;
-use frcw::recom::RecomProposal;
-use frcw::recom::{RecomParams, RecomVariant};
-use frcw::stats::{SelfLoopCounts, SelfLoopReason, StatsWriter};
+use rustrecom::constraints::{make_constraint, ChainConstraint, ConstraintConfig};
+use rustrecom::graph::Graph;
+use rustrecom::partition::Partition;
+use rustrecom::recom::run::multi_chain_with_constraint;
+use rustrecom::recom::RecomProposal;
+use rustrecom::recom::{RecomParams, RecomVariant};
+use rustrecom::stats::{SelfLoopCounts, SelfLoopReason, StatsWriter};
 use std::io::Result as IoResult;
 use std::sync::{Arc, Mutex};
 use test_fixtures::fixture_with_attributes;

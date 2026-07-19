@@ -2,8 +2,8 @@
 //!
 //! These read bundles back in-process with the Rust `BendlReader` rather than
 //! shelling out to the crate's `bendl` CLI, which is not guaranteed on PATH in
-//! the test environment. One provenance test does invoke the built `frcw`
-//! binary (via `CARGO_BIN_EXE_frcw`) to exercise the real metadata wiring.
+//! the test environment. One provenance test does invoke the built `rustrecom`
+//! binary (via `CARGO_BIN_EXE_rustrecom`) to exercise the real metadata wiring.
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -16,11 +16,11 @@ use binary_ensemble::io::reader::BenStreamReader;
 use serde_json::Value;
 use sha3::{Digest, Sha3_256};
 
-use frcw::bendl::{reorder_graph_json, BendlGraphOrder};
-use frcw::init::from_networkx_value;
-use frcw::recom::run::multi_chain;
-use frcw::recom::{RecomParams, RecomVariant};
-use frcw::stats::{BendlBenStreamWriter, StatsWriter};
+use rustrecom::bendl::{reorder_graph_json, BendlGraphOrder};
+use rustrecom::init::from_networkx_value;
+use rustrecom::recom::run::multi_chain;
+use rustrecom::recom::{RecomParams, RecomVariant};
+use rustrecom::stats::{BendlBenStreamWriter, StatsWriter};
 
 /// The 6x6 grid fixture: 36 nodes, 6 districts of 6 nodes each.
 const GRAPH_JSON: &str = include_str!("../test_fixtures/graphs/6x6.json");
@@ -37,7 +37,7 @@ fn temp_path(tag: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     path.push(format!(
-        "frcw_bendl_{}_{}_{}.bendl",
+        "rustrecom_bendl_{}_{}_{}.bendl",
         tag,
         std::process::id(),
         ts
@@ -282,13 +282,13 @@ fn read_metadata(path: &PathBuf) -> Value {
 }
 
 #[test]
-fn provenance_via_frcw_binary() {
-    let frcw = env!("CARGO_BIN_EXE_frcw");
+fn provenance_via_rustrecom_binary() {
+    let rustrecom = env!("CARGO_BIN_EXE_rustrecom");
     let graph_path = "test_fixtures/graphs/6x6.json";
 
     // order=none: source and embedded hashes are equal.
     let none_path = temp_path("prov_none");
-    let status = Command::new(frcw)
+    let status = Command::new(rustrecom)
         .args([
             "--graph-json",
             graph_path,
@@ -311,7 +311,7 @@ fn provenance_via_frcw_binary() {
             "--overwrite-output",
         ])
         .status()
-        .expect("run frcw bendl none");
+        .expect("run rustrecom bendl none");
     assert!(status.success());
     let meta = read_metadata(&none_path);
     let source = meta["source_graph_sha3"].as_str().unwrap();
@@ -326,7 +326,7 @@ fn provenance_via_frcw_binary() {
     // order=mlc: hashes differ, and embedded matches a fresh hash of the Graph
     // asset bytes.
     let mlc_path = temp_path("prov_mlc");
-    let status = Command::new(frcw)
+    let status = Command::new(rustrecom)
         .args([
             "--graph-json",
             graph_path,
@@ -351,7 +351,7 @@ fn provenance_via_frcw_binary() {
             "--overwrite-output",
         ])
         .status()
-        .expect("run frcw bendl mlc");
+        .expect("run rustrecom bendl mlc");
     assert!(status.success());
     let decoded = decode_bundle(&mlc_path);
     let meta: Value = serde_json::from_slice(&decoded.metadata_asset).unwrap();
@@ -371,8 +371,8 @@ fn provenance_via_frcw_binary() {
 
 #[test]
 fn bendl_writer_without_output_file_is_rejected_by_binary() {
-    let frcw = env!("CARGO_BIN_EXE_frcw");
-    let output = Command::new(frcw)
+    let rustrecom = env!("CARGO_BIN_EXE_rustrecom");
+    let output = Command::new(rustrecom)
         .args([
             "--graph-json",
             "test_fixtures/graphs/6x6.json",
@@ -392,7 +392,7 @@ fn bendl_writer_without_output_file_is_rejected_by_binary() {
             "bendl",
         ])
         .output()
-        .expect("run frcw");
+        .expect("run rustrecom");
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(

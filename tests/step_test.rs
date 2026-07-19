@@ -1,9 +1,9 @@
 // Functional tests that verify ReCom chain invariants at each step.
-use frcw::graph::Graph;
-use frcw::partition::Partition;
-use frcw::recom::run::multi_chain;
-use frcw::recom::{RecomParams, RecomProposal, RecomVariant};
-use frcw::stats::{SelfLoopCounts, StatsWriter};
+use rustrecom::graph::Graph;
+use rustrecom::partition::Partition;
+use rustrecom::recom::run::multi_chain;
+use rustrecom::recom::{RecomParams, RecomProposal, RecomVariant};
+use rustrecom::stats::{SelfLoopCounts, StatsWriter};
 use std::collections::HashSet;
 use std::io::Result as IOResult;
 use std::iter::FromIterator;

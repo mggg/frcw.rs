@@ -17,7 +17,7 @@ use std::collections::HashSet;
 /// supplies `boundary_perim_col` but omits `perim_col` -- the loader writes
 /// the derived total-perimeter values here and the objective reads them back
 /// through the same key.
-const DERIVED_PERIM_COL: &str = "__frcw_derived_perim";
+const DERIVED_PERIM_COL: &str = "__rustrecom_derived_perim";
 
 /// Per-district cached state for an [`ObjectiveConfig::PolsbyPopper`] objective.
 #[derive(Clone, Debug)]

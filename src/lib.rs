@@ -1,4 +1,4 @@
-//! Library definition for frcw.
+//! Library definition for rustrecom.
 pub mod bendl;
 mod buffers;
 pub mod config;

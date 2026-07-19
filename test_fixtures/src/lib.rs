@@ -1,6 +1,6 @@
-use frcw::graph::Graph;
-use frcw::init::from_networkx;
-use frcw::partition::Partition;
+use rustrecom::graph::Graph;
+use rustrecom::init::from_networkx;
+use rustrecom::partition::Partition;
 /// Graph/initial partition fixtures for long-running tests.
 use std::path::PathBuf;
 

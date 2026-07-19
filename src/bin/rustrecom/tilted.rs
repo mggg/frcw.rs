@@ -3,12 +3,12 @@
 
 use crate::common;
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
-use frcw::objectives::{ensure_derived_perim_column, polsby_popper_autoderive};
-use frcw::recom::tilted::{
+use rustrecom::objectives::{ensure_derived_perim_column, polsby_popper_autoderive};
+use rustrecom::recom::tilted::{
     core::REVERSIBLE_UNSUPPORTED, multi_tilted_runs_with_writer, ExponentialAcceptance,
     FixedAcceptance, IncrementalBackend, LinearAcceptance,
 };
-use frcw::recom::RecomParams;
+use rustrecom::recom::RecomParams;
 use serde_json::json;
 
 pub fn command() -> Command {
@@ -373,7 +373,7 @@ pub fn run(matches: &ArgMatches) -> Result<(), String> {
             writers
                 .stats
                 .as_mut()
-                .map(|writer| &mut **writer as &mut dyn frcw::stats::StatsWriter),
+                .map(|writer| &mut **writer as &mut dyn rustrecom::stats::StatsWriter),
             writers.scores.as_mut(),
             show_progress,
             write_improved_scores_only,
@@ -389,7 +389,7 @@ pub fn run(matches: &ArgMatches) -> Result<(), String> {
             writers
                 .stats
                 .as_mut()
-                .map(|writer| &mut **writer as &mut dyn frcw::stats::StatsWriter),
+                .map(|writer| &mut **writer as &mut dyn rustrecom::stats::StatsWriter),
             writers.scores.as_mut(),
             show_progress,
             write_improved_scores_only,
@@ -405,7 +405,7 @@ pub fn run(matches: &ArgMatches) -> Result<(), String> {
             writers
                 .stats
                 .as_mut()
-                .map(|writer| &mut **writer as &mut dyn frcw::stats::StatsWriter),
+                .map(|writer| &mut **writer as &mut dyn rustrecom::stats::StatsWriter),
             writers.scores.as_mut(),
             show_progress,
             write_improved_scores_only,

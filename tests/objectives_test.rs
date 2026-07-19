@@ -1,7 +1,7 @@
 use approx::assert_relative_eq;
-use frcw::graph::Graph;
-use frcw::objectives::{make_objective_fn, required_edge_cols, required_node_cols};
-use frcw::partition::Partition;
+use rustrecom::graph::Graph;
+use rustrecom::objectives::{make_objective_fn, required_edge_cols, required_node_cols};
+use rustrecom::partition::Partition;
 
 fn path_graph_with_attrs(
     assignments: Vec<u32>,

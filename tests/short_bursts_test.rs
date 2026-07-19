@@ -1,11 +1,11 @@
 // Functional tests for short bursts optimization.
-use frcw::graph::Graph;
-use frcw::objectives::{make_objective, IncrementalObjective};
-use frcw::partition::Partition;
-use frcw::recom::short_bursts::multi_short_bursts_with_writer;
-use frcw::recom::RecomProposal;
-use frcw::recom::{FullRescoreBackend, IncrementalBackend, RecomParams, RecomVariant};
-use frcw::stats::{ScoresWriter, SelfLoopCounts, StatsWriter};
+use rustrecom::graph::Graph;
+use rustrecom::objectives::{make_objective, IncrementalObjective};
+use rustrecom::partition::Partition;
+use rustrecom::recom::short_bursts::multi_short_bursts_with_writer;
+use rustrecom::recom::RecomProposal;
+use rustrecom::recom::{FullRescoreBackend, IncrementalBackend, RecomParams, RecomVariant};
+use rustrecom::stats::{ScoresWriter, SelfLoopCounts, StatsWriter};
 use std::io::Result as IOResult;
 
 use test_fixtures::fixture_with_attributes;
@@ -264,7 +264,7 @@ fn test_short_bursts_improved_scores_only_cross_validation() {
     make_objective(config).cache_graph_cols(&mut graph);
     let mut all_writer = RecordingWriter::new();
     let all_scores_path = std::env::temp_dir().join(format!(
-        "frcw_sb_xval_all_scores_{}_{}.csv",
+        "rustrecom_sb_xval_all_scores_{}_{}.csv",
         std::process::id(),
         RNG_SEED
     ));
@@ -295,7 +295,7 @@ fn test_short_bursts_improved_scores_only_cross_validation() {
     make_objective(config).cache_graph_cols(&mut graph2);
     let mut best_writer = RecordingWriter::new();
     let best_scores_path = std::env::temp_dir().join(format!(
-        "frcw_sb_xval_best_scores_{}_{}.csv",
+        "rustrecom_sb_xval_best_scores_{}_{}.csv",
         std::process::id(),
         RNG_SEED
     ));
@@ -428,7 +428,7 @@ fn test_short_bursts_scores_district_vector_tracks_each_step() {
 
     let mut stats_writer = RecordingWriter::new();
     let scores_path = std::env::temp_dir().join(format!(
-        "frcw_sb_district_vector_{}_{}.csv",
+        "rustrecom_sb_district_vector_{}_{}.csv",
         std::process::id(),
         RNG_SEED
     ));

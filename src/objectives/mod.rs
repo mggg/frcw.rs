@@ -456,7 +456,7 @@ pub fn make_objective_fn(config: &str) -> impl Fn(&Graph, &Partition) -> f64 + S
 /// Returns the node attribute columns required by the given objective config.
 ///
 /// Use this in CLI binaries to ensure these columns are included in the
-/// `columns` argument to [`frcw::init::from_networkx`].
+/// `columns` argument to [`rustrecom::init::from_networkx`].
 pub fn required_node_cols(config: &str) -> Vec<String> {
     let data: Value = serde_json::from_str(config).unwrap();
     match data["objective"].as_str().unwrap() {
@@ -473,7 +473,7 @@ pub fn required_node_cols(config: &str) -> Vec<String> {
 
 /// Returns the node attribute columns that the objective config references
 /// but which may be absent on some nodes. These should be passed to
-/// [`frcw::init::from_networkx`] as `partial_columns`: missing entries are
+/// [`rustrecom::init::from_networkx`] as `partial_columns`: missing entries are
 /// stored as `"null"` rather than panicking.
 ///
 /// Today this only returns Polsby-Popper's `boundary_perim_col` (when set),
@@ -493,7 +493,7 @@ pub fn partial_node_cols(config: &str) -> Vec<String> {
 /// Returns the edge attribute columns required by the given objective config.
 ///
 /// Use this in CLI binaries to determine which columns to pass as `edge_float_cols`
-/// to [`frcw::init::from_networkx`].
+/// to [`rustrecom::init::from_networkx`].
 pub fn required_edge_cols(config: &str) -> Vec<String> {
     let data: Value = serde_json::from_str(config).unwrap();
     match data["objective"].as_str().unwrap() {

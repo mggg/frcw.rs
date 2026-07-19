@@ -6,7 +6,7 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 use clap::{value_parser, Arg, Command};
-// use frcw::init::graph_from_networkx;
+// use rustrecom::init::graph_from_networkx;
 use petgraph::graph::{Graph, NodeIndex};
 use serde_json::Value;
 use std::collections::BTreeMap;

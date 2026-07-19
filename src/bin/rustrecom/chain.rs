@@ -9,11 +9,11 @@
 
 use crate::common;
 use clap::{parser::ValueSource, value_parser, Arg, ArgAction, ArgMatches, Command};
-use frcw::config::{parse_chain_config, region_weights_from_map, LoadedChainConfig};
-use frcw::constraints::{make_constraint, make_constraint_value, ConstraintConfig};
-use frcw::recom::run::multi_chain_with_constraint;
-use frcw::recom::{RecomParams, RecomVariant};
-use frcw::stats::{BendlBenStreamWriter, StatsWriter};
+use rustrecom::config::{parse_chain_config, region_weights_from_map, LoadedChainConfig};
+use rustrecom::constraints::{make_constraint, make_constraint_value, ConstraintConfig};
+use rustrecom::recom::run::multi_chain_with_constraint;
+use rustrecom::recom::{RecomParams, RecomVariant};
+use rustrecom::stats::{BendlBenStreamWriter, StatsWriter};
 use serde_json::json;
 use std::fs;
 use std::io::{self, Write};
@@ -258,7 +258,7 @@ impl ResolvedChainArgs {
                 .collect(),
             constraint,
             cli_constraint_json,
-            region_weights: frcw::config::parse_region_weights_config(region_weights_raw),
+            region_weights: rustrecom::config::parse_region_weights_config(region_weights_raw),
             edge_weight_keys: matches
                 .get_many::<String>("edge_weight_keys")
                 .unwrap_or_default()

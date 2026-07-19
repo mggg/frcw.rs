@@ -16,11 +16,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use binary_ensemble::io::reader::BenStreamReader;
 use serde_json::Value;
 
-use frcw::init::from_networkx_value;
-use frcw::partition::Partition;
-use frcw::recom::run::multi_chain;
-use frcw::recom::{RecomParams, RecomProposal, RecomVariant};
-use frcw::stats::{
+use rustrecom::init::from_networkx_value;
+use rustrecom::partition::Partition;
+use rustrecom::recom::run::multi_chain;
+use rustrecom::recom::{RecomParams, RecomProposal, RecomVariant};
+use rustrecom::stats::{
     BenWriter, JSONLWriter, PcompressWriter, SelfLoopCounts, SelfLoopReason, StatsWriter, TSVWriter,
 };
 
@@ -35,7 +35,7 @@ fn temp_path(tag: &str, ext: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     path.push(format!(
-        "frcw_{}_{}_{}.{}",
+        "rustrecom_{}_{}_{}.{}",
         tag,
         std::process::id(),
         ts,
@@ -44,7 +44,7 @@ fn temp_path(tag: &str, ext: &str) -> PathBuf {
     path
 }
 
-fn load_grid() -> (frcw::graph::Graph, Partition) {
+fn load_grid() -> (rustrecom::graph::Graph, Partition) {
     let data: Value = serde_json::from_str(GRAPH_JSON).unwrap();
     from_networkx_value(data, "population", "district", vec![], vec![], vec![]).unwrap()
 }

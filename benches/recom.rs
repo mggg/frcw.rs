@@ -1,8 +1,8 @@
 /// ReCom chain benchmarks.
-use frcw::graph::Graph;
-use frcw::partition::Partition;
-use frcw::recom::RecomProposal;
-use frcw::stats::{SelfLoopCounts, StatsWriter};
+use rustrecom::graph::Graph;
+use rustrecom::partition::Partition;
+use rustrecom::recom::RecomProposal;
+use rustrecom::stats::{SelfLoopCounts, StatsWriter};
 use std::default::Default;
 
 /// A `StatsWriter` that does nothing.

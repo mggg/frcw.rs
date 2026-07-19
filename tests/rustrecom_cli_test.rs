@@ -21,12 +21,12 @@ const BASE_ARGS: &[&str] = &[
     "canonical",
 ];
 
-fn run_frcw(extra_args: &[&str]) -> Vec<u8> {
-    let output = Command::new(env!("CARGO_BIN_EXE_frcw"))
+fn run_chain(extra_args: &[&str]) -> Vec<u8> {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustrecom"))
         .args(BASE_ARGS)
         .args(extra_args)
         .output()
-        .expect("run frcw");
+        .expect("run rustrecom");
     assert!(
         output.status.success(),
         "status: {:?}\nstderr:\n{}",
@@ -62,17 +62,17 @@ fn config(writer: &str, output: Option<&str>, constraint: Option<Value>) -> Stri
 }
 
 fn run_config(config: &str, extra_args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_frcw"))
+    Command::new(env!("CARGO_BIN_EXE_rustrecom"))
         .arg("--config")
         .arg(config)
         .args(extra_args)
         .output()
-        .expect("run frcw config mode")
+        .expect("run rustrecom config mode")
 }
 
 fn temp_output(name: &str, suffix: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
-        "frcw_config_test_{}_{}_{}",
+        "rustrecom_config_test_{}_{}_{}",
         std::process::id(),
         name,
         suffix
@@ -86,12 +86,12 @@ fn metadata_path(output_path: &PathBuf) -> PathBuf {
 
 #[test]
 fn show_progress_does_not_change_stdout() {
-    assert_eq!(run_frcw(&[]), run_frcw(&["--show-progress"]));
+    assert_eq!(run_chain(&[]), run_chain(&["--show-progress"]));
 }
 
 #[test]
 fn empty_constraint_does_not_change_stdout() {
-    assert_eq!(run_frcw(&[]), run_frcw(&["--constraint", ""]));
+    assert_eq!(run_chain(&[]), run_chain(&["--constraint", ""]));
 }
 
 #[test]
@@ -103,7 +103,7 @@ fn config_mode_matches_cli_stdout() {
         "stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(output.stdout, run_frcw(&[]));
+    assert_eq!(output.stdout, run_chain(&[]));
 }
 
 #[test]
@@ -111,11 +111,11 @@ fn config_file_argument_matches_inline_config() {
     let config_path = temp_output("config_file", "config.json");
     let raw = config("canonical", None, None);
     fs::write(&config_path, &raw).unwrap();
-    let from_file = Command::new(env!("CARGO_BIN_EXE_frcw"))
+    let from_file = Command::new(env!("CARGO_BIN_EXE_rustrecom"))
         .arg("--config")
         .arg(&config_path)
         .output()
-        .expect("run frcw --config <path>");
+        .expect("run rustrecom --config <path>");
     assert!(
         from_file.status.success(),
         "stderr:\n{}",
@@ -131,21 +131,21 @@ fn config_stdin_argument_matches_inline_config() {
     use std::process::Stdio;
 
     let raw = config("canonical", None, None);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_frcw"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rustrecom"))
         .arg("--config")
         .arg("-")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn frcw --config -");
+        .expect("spawn rustrecom --config -");
     child
         .stdin
         .take()
         .unwrap()
         .write_all(raw.as_bytes())
         .unwrap();
-    let from_stdin = child.wait_with_output().expect("run frcw --config -");
+    let from_stdin = child.wait_with_output().expect("run rustrecom --config -");
     assert!(
         from_stdin.status.success(),
         "stderr:\n{}",

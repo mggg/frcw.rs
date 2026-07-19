@@ -1,5 +1,5 @@
 [package]
-name = "frcw"
+name = "rustrecom"
 version = "0.1.4"
 authors = ["Parker J. Rule <parker.rule@tufts.edu>", "Peter Rock <peter.r.rock2@gmail.com>"]
 edition = "2021"

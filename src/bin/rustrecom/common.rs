@@ -1,4 +1,4 @@
-//! Helpers shared by the frcw subcommands.
+//! Helpers shared by the rustrecom subcommands.
 //!
 //! Everything here is a consolidation of code that was byte-identical (or
 //! differed only in a message label, passed through as a parameter) across the
@@ -8,15 +8,15 @@
 //! stay in the command modules.
 
 use clap::{value_parser, Arg, ArgAction, ArgMatches};
-use frcw::bendl::{reorder_graph_json, BendlGraphOrder};
-use frcw::graph::Graph;
-use frcw::init::{from_networkx, from_networkx_value};
-use frcw::objectives::{
+use rustrecom::bendl::{reorder_graph_json, BendlGraphOrder};
+use rustrecom::graph::Graph;
+use rustrecom::init::{from_networkx, from_networkx_value};
+use rustrecom::objectives::{
     make_objective, partial_node_cols, required_edge_cols, required_node_cols, ObjectiveConfig,
 };
-use frcw::partition::Partition;
-use frcw::recom::RecomVariant;
-use frcw::stats::{
+use rustrecom::partition::Partition;
+use rustrecom::recom::RecomVariant;
+use rustrecom::stats::{
     AssignmentsOnlyWriter, BenWriter, BendlBenStreamWriter, CanonicalWriter, JSONLWriter,
     PcompressWriter, ScoresWriter, StatsWriter, TSVWriter,
 };
@@ -367,7 +367,7 @@ pub fn parse_optimizer_inputs(matches: &ArgMatches) -> OptimizerInputs {
         .map(|c| c.to_string())
         .collect();
     let region_weights_raw = (*matches.get_one::<String>("region_weights").unwrap()).as_str();
-    let region_weights = frcw::config::parse_region_weights_config(region_weights_raw);
+    let region_weights = rustrecom::config::parse_region_weights_config(region_weights_raw);
     merge_region_weight_cols(&mut sum_cols, &region_weights);
     OptimizerInputs {
         graph_json,

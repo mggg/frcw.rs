@@ -1,14 +1,14 @@
 // Functional tests for tilted run optimization.
-use frcw::graph::Graph;
-use frcw::objectives::{make_objective, make_objective_fn, required_node_cols};
-use frcw::partition::Partition;
-use frcw::recom::tilted::{
+use rustrecom::graph::Graph;
+use rustrecom::objectives::{make_objective, make_objective_fn, required_node_cols};
+use rustrecom::partition::Partition;
+use rustrecom::recom::tilted::{
     multi_tilted_runs, multi_tilted_runs_with_writer, AcceptanceRule, ExponentialAcceptance,
     FixedAcceptance, FullRescoreBackend, IncrementalBackend, LinearAcceptance,
 };
-use frcw::recom::RecomProposal;
-use frcw::recom::{RecomParams, RecomVariant};
-use frcw::stats::{CanonicalWriter, ScoresWriter, SelfLoopCounts, StatsWriter};
+use rustrecom::recom::RecomProposal;
+use rustrecom::recom::{RecomParams, RecomVariant};
+use rustrecom::stats::{CanonicalWriter, ScoresWriter, SelfLoopCounts, StatsWriter};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
@@ -395,7 +395,7 @@ fn test_tilted_scores_writer_records_every_step() {
         edge_weight_keys: vec![],
     };
     let path = std::env::temp_dir().join(format!(
-        "frcw_tilted_scores_{}_{}.csv",
+        "rustrecom_tilted_scores_{}_{}.csv",
         std::process::id(),
         RNG_SEED
     ));
@@ -452,7 +452,7 @@ fn test_tilted_improved_scores_only_writer_records_only_improvements() {
         edge_weight_keys: vec![],
     };
     let path = std::env::temp_dir().join(format!(
-        "frcw_tilted_best_scores_{}_{}.csv",
+        "rustrecom_tilted_best_scores_{}_{}.csv",
         std::process::id(),
         RNG_SEED
     ));
@@ -517,7 +517,7 @@ fn test_tilted_canonical_writer_mixed_ending_counts(
         edge_weight_keys: vec![],
     };
     let path = std::env::temp_dir().join(format!(
-        "frcw_tilted_mixed_{}_{}_{}_{}.jsonl",
+        "rustrecom_tilted_mixed_{}_{}_{}_{}.jsonl",
         std::process::id(),
         n_threads,
         (accept_worse_prob * 10.0) as u64,
@@ -597,7 +597,7 @@ fn test_tilted_canonical_writer_flushes_terminal_self_loops() {
         edge_weight_keys: vec![],
     };
     let path = std::env::temp_dir().join(format!(
-        "frcw_tilted_canonical_{}_{}.jsonl",
+        "rustrecom_tilted_canonical_{}_{}.jsonl",
         std::process::id(),
         RNG_SEED
     ));
@@ -1251,8 +1251,8 @@ fn test_backends_agree_on_full_score_trajectory() {
     objective.cache_graph_cols(&mut graph);
 
     let pid = std::process::id();
-    let path_full = std::env::temp_dir().join(format!("frcw_xback_full_{}.csv", pid));
-    let path_inc = std::env::temp_dir().join(format!("frcw_xback_inc_{}.csv", pid));
+    let path_full = std::env::temp_dir().join(format!("rustrecom_xback_full_{}.csv", pid));
+    let path_inc = std::env::temp_dir().join(format!("rustrecom_xback_inc_{}.csv", pid));
     {
         let mut full_writer = ScoresWriter::new(Box::new(std::io::BufWriter::new(
             fs::File::create(&path_full).unwrap(),

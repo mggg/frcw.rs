@@ -405,7 +405,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        path.push(format!("frcw_init_test_{}_{}.json", std::process::id(), ts));
+        path.push(format!(
+            "rustrecom_init_test_{}_{}.json",
+            std::process::id(),
+            ts
+        ));
         fs::write(&path, data).unwrap();
         path
     }

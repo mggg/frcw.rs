@@ -5,4 +5,4 @@ authors = ["Parker J. Rule <parker.rule@tufts.edu>"]
 edition = "2018"
 
 [dependencies]
-frcw = { path = ".." }
+rustrecom = { path = ".." }
