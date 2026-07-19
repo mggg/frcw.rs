@@ -3,9 +3,11 @@ name = "frcw"
 version = "0.1.4"
 authors = ["Parker J. Rule <parker.rule@tufts.edu>", "Peter Rock <peter.r.rock2@gmail.com>"]
 edition = "2021"
+default-run = "rustrecom"
 
 [dependencies]
-clap = "4.5.51"
+# `string` lets the CLI name itself from argv[0] (rustrecom vs the frcw alias).
+clap = { version = "4.5.51", features = ["string"] }
 crossbeam-channel = "0.5.0"
 crossbeam = "0.8.0"
 mimalloc = {version = "0.1.27", default-features=false}
@@ -32,10 +34,6 @@ test_fixtures = { path = "test_fixtures" }
 # Enables spanning tree statistics (and eventually other features
 # that depend on a working BLAS installation).
 linalg = ["ndarray", "ndarray-linalg"]
-
-[[bin]]
-name = "frcw_tilted"
-path = "src/bin/frcw_tilted.rs"
 
 [[bench]]
 name = "recom"

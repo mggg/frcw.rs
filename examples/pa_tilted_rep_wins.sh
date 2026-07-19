@@ -20,7 +20,7 @@ OBJECTIVE='{
 
 cd "$REPO_ROOT"
 
-cargo run --release --bin frcw_tilted -- \
+cargo run --release --bin rustrecom -- tilted \
     --graph-json "$GRAPH_JSON" \
     --n-steps 5000 \
     --tol 0.05 \
@@ -28,6 +28,7 @@ cargo run --release --bin frcw_tilted -- \
     --assignment-col 2011_PLA_1 \
     --rng-seed 20260409 \
     --n-threads 8 \
+    --accept-rule fixed \
     --accept-worse-prob 0.05 \
     --objective "$OBJECTIVE" \
     --maximize true \

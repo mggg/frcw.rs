@@ -13,7 +13,7 @@ OBJECTIVE='{
 
 cd "$REPO_ROOT"
 
-cargo run --release --bin frcw_short_bursts -- \
+cargo run --release --bin rustrecom -- short-bursts \
     --graph-json "$GRAPH_JSON" \
     --n-steps 2000 \
     --tol 0.05 \

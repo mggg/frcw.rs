@@ -53,6 +53,11 @@ const WRITER_CHANNEL_CAPACITY: usize = 128;
 /// Public type alias for the score type used by the short-bursts engine.
 pub type ScoreValue = f64;
 
+/// Engine rejection message for reversible ReCom. The CLI-layer guard reuses
+/// this string so the two layers cannot drift.
+pub const REVERSIBLE_UNSUPPORTED: &str =
+    "Reversible ReCom is not supported by the short bursts optimizer.";
+
 /// Draws one candidate proposal, retrying internally on non-adjacent district
 /// pairs, disconnected subgraphs, or no-balanced-cut splits. Always returns a
 /// [`ScoredProposal`] (short bursts has no within-chain rejection).
@@ -267,7 +272,7 @@ where
         return Err("n_threads must be at least 1".to_string());
     }
     if params.variant == RecomVariant::Reversible {
-        return Err("Reversible ReCom is not supported by the short bursts optimizer.".to_string());
+        return Err(REVERSIBLE_UNSUPPORTED.to_string());
     }
     if burst_length == 0 {
         return Err("burst_length must be at least 1".to_string());

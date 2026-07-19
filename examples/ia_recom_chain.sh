@@ -6,7 +6,7 @@ GRAPH_JSON="$REPO_ROOT/test_fixtures/graphs/IA_counties.json"
 
 cd "$REPO_ROOT"
 
-cargo run --release --bin frcw -- \
+cargo run --release --bin rustrecom -- \
     --graph-json "$GRAPH_JSON" \
     --n-steps 5000 \
     --tol 0.20 \

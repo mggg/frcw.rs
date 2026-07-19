@@ -39,6 +39,11 @@ use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 /// threads. Large enough to absorb transient writer stalls; small enough to
 /// cap worst-case memory growth if a writer stays persistently behind.
 const WRITER_CHANNEL_CAPACITY: usize = 128;
+
+/// Engine rejection message for reversible ReCom. The CLI-layer guard reuses
+/// this string so the two layers cannot drift.
+pub const REVERSIBLE_UNSUPPORTED: &str =
+    "Reversible ReCom is not supported by the tilted run optimizer.";
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
@@ -595,7 +600,7 @@ where
         return Err("n_threads must be at least 1".to_string());
     }
     if params.variant == RecomVariant::Reversible {
-        return Err("Reversible ReCom is not supported by the tilted run optimizer.".to_string());
+        return Err(REVERSIBLE_UNSUPPORTED.to_string());
     }
 
     // The stats writer emits the seed plan in `init`, which counts as the
