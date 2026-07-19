@@ -1,4 +1,4 @@
-//! End-to-end CLI tests for `frcw_tilted` acceptance-rule configuration.
+//! End-to-end CLI tests for `frcw tilted` acceptance-rule configuration.
 
 use serde_json::Value;
 use std::fs;
@@ -62,16 +62,17 @@ fn base_args(scores_path: &Path) -> Vec<String> {
 }
 
 fn run_tilted(tag: &str, extra_args: &[&str]) -> (PathBuf, PathBuf, Value) {
-    let frcw_tilted = env!("CARGO_BIN_EXE_frcw_tilted");
+    let frcw = env!("CARGO_BIN_EXE_frcw");
     let scores_path = temp_path(tag, "csv");
     let meta_path = metadata_path(&scores_path);
     let mut args = base_args(&scores_path);
     args.extend(extra_args.iter().map(|arg| arg.to_string()));
 
-    let output = Command::new(frcw_tilted)
+    let output = Command::new(frcw)
+        .arg("tilted")
         .args(&args)
         .output()
-        .expect("run frcw_tilted");
+        .expect("run frcw tilted");
     assert!(
         output.status.success(),
         "status: {:?}\nstderr:\n{}",
@@ -178,7 +179,7 @@ fn exponential_uses_shared_acceptance_beta() {
 
 #[test]
 fn fixed_acceptance_rejects_shared_beta_to_avoid_ambiguous_configuration() {
-    let frcw_tilted = env!("CARGO_BIN_EXE_frcw_tilted");
+    let frcw = env!("CARGO_BIN_EXE_frcw");
     let scores_path = temp_path("reject_fixed_beta", "csv");
     let mut args = base_args(&scores_path);
     args.extend([
@@ -190,10 +191,11 @@ fn fixed_acceptance_rejects_shared_beta_to_avoid_ambiguous_configuration() {
         "2".to_string(),
     ]);
 
-    let output = Command::new(frcw_tilted)
+    let output = Command::new(frcw)
+        .arg("tilted")
         .args(&args)
         .output()
-        .expect("run frcw_tilted");
+        .expect("run frcw tilted");
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -208,17 +210,18 @@ fn fixed_acceptance_rejects_shared_beta_to_avoid_ambiguous_configuration() {
 
 #[test]
 fn linear_acceptance_beta_must_be_positive() {
-    let frcw_tilted = env!("CARGO_BIN_EXE_frcw_tilted");
+    let frcw = env!("CARGO_BIN_EXE_frcw");
     for (tag, beta) in [("zero_beta", "0"), ("negative_beta", "-0.1")] {
         let scores_path = temp_path(tag, "csv");
         let mut args = base_args(&scores_path);
         args.extend(["--accept-rule".to_string(), "linear".to_string()]);
         args.push(format!("--acceptance-beta={}", beta));
 
-        let output = Command::new(frcw_tilted)
+        let output = Command::new(frcw)
+            .arg("tilted")
             .args(&args)
             .output()
-            .expect("run frcw_tilted");
+            .expect("run frcw tilted");
         assert!(!output.status.success(), "beta {} should be rejected", beta);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
@@ -241,16 +244,17 @@ fn exponential_acceptance_beta_allows_zero_but_not_negative() {
     assert_eq!(meta["accept_rule"].as_str(), Some("exponential"));
     assert_eq!(meta["acceptance_beta"].as_f64(), Some(0.0));
 
-    let frcw_tilted = env!("CARGO_BIN_EXE_frcw_tilted");
+    let frcw = env!("CARGO_BIN_EXE_frcw");
     let scores_path = temp_path("negative_exponential_beta", "csv");
     let mut args = base_args(&scores_path);
     args.extend(["--accept-rule".to_string(), "exponential".to_string()]);
     args.push("--acceptance-beta=-0.1".to_string());
 
-    let output = Command::new(frcw_tilted)
+    let output = Command::new(frcw)
+        .arg("tilted")
         .args(&args)
         .output()
-        .expect("run frcw_tilted");
+        .expect("run frcw tilted");
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
