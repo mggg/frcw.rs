@@ -50,8 +50,8 @@ pub trait StatsWriter: Send {
 }
 
 /// Writes chain statistics in TSV (tab-separated values) format.
-/// Each step in the chain is a line; no statistics are saved about the
-/// initial partition.
+/// Each accepted proposal in the chain is a line; no statistics are saved
+/// about the initial partition.
 ///
 /// Rows in the output contain the following columns:
 ///   * `step` - The step count at the accepted proposal (including self-loops).
@@ -59,12 +59,20 @@ pub trait StatsWriter: Send {
 ///   * `no_split` - The number of self-loops due to the lack of an ε-balanced split.
 ///   * `seam_length` - The number of self-loops due to seam length rejection
 ///     (Reversible ReCom only).
+///   * `tilted_rejection` - The number of self-loops due to objective score
+///     rejection (tilted runs only).
 ///   * `a_label` - The label of the `a`-district in the proposal.
 ///   * `b_label` - The label of the `b`-district in the proposal.
 ///   * `a_pop` - The population of the new `a`-district.
 ///   * `b_pop` - The population of the new `b`-district.
 ///   * `a_nodes` - The list of node indices in the new `a`-district.
 ///   * `b_nodes` - The list of node indices in the new `b`-district.
+///   * `constraint_violation` - The number of self-loops due to constraint
+///     violations.
+///
+/// If the chain ends with self-loops after the last accepted proposal, one
+/// final row records those counts with the terminal step number and blank
+/// proposal columns.
 pub struct TSVWriter {
     // The output stream that we would like to write to.
     output: Box<dyn Write + Send>,
@@ -463,8 +471,9 @@ impl ScoresWriter {
 impl StatsWriter for TSVWriter {
     fn init(&mut self, _graph: &Graph, _partition: &Partition) -> Result<()> {
         // TSV column header.
+        // `constraint_violation` is appended last so existing column indices stay stable.
         self.output.write_all(
-            b"step\tnon_adjacent\tno_split\tseam_length\ttilted_rejection\ta_label\tb_label\ta_pop\tb_pop\ta_nodes\tb_nodes\n",
+            b"step\tnon_adjacent\tno_split\tseam_length\ttilted_rejection\ta_label\tb_label\ta_pop\tb_pop\ta_nodes\tb_nodes\tconstraint_violation\n",
         )?;
         Ok(())
     }
@@ -480,7 +489,7 @@ impl StatsWriter for TSVWriter {
         self.output
             .write_all(
                 format!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:?}\t{:?}\n",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:?}\t{:?}\t{}\n",
                     step,
                     counts.get(SelfLoopReason::NonAdjacent),
                     counts.get(SelfLoopReason::NoSplit),
@@ -491,12 +500,36 @@ impl StatsWriter for TSVWriter {
                     proposal.a_pop,
                     proposal.b_pop,
                     proposal.a_nodes,
-                    proposal.b_nodes
+                    proposal.b_nodes,
+                    counts.get(SelfLoopReason::ConstraintViolation)
                 )
                 .as_bytes(),
             )
             .expect("Failed to write to output");
         Ok(())
+    }
+
+    fn self_loop(
+        &mut self,
+        step: u64,
+        _graph: &Graph,
+        _partition: &Partition,
+        counts: &SelfLoopCounts,
+    ) -> Result<()> {
+        // Terminal self-loops have no associated proposal: keep the row width
+        // fixed and leave the six proposal columns blank.
+        self.output.write_all(
+            format!(
+                "{}\t{}\t{}\t{}\t{}\t\t\t\t\t\t\t{}\n",
+                step,
+                counts.get(SelfLoopReason::NonAdjacent),
+                counts.get(SelfLoopReason::NoSplit),
+                counts.get(SelfLoopReason::SeamLength),
+                counts.get(SelfLoopReason::TiltedRejection),
+                counts.get(SelfLoopReason::ConstraintViolation)
+            )
+            .as_bytes(),
+        )
     }
 
     fn close(&mut self) -> Result<()> {
@@ -565,6 +598,25 @@ impl StatsWriter for JSONLWriter {
             .write_all(format!("{}\n", json!({ "step": step }).to_string()).as_bytes())
             .expect("Failed to write to output");
         Ok(())
+    }
+
+    fn self_loop(
+        &mut self,
+        step: u64,
+        _graph: &Graph,
+        _partition: &Partition,
+        counts: &SelfLoopCounts,
+    ) -> Result<()> {
+        // Terminal self-loops have no proposal, so they get a distinct record
+        // type: consumers treat every top-level "step" as an accepted proposal
+        // with full proposal fields.
+        self.output.write_all(
+            format!(
+                "{}\n",
+                json!({ "self_loop": { "step": step, "counts": counts } })
+            )
+            .as_bytes(),
+        )
     }
 
     fn close(&mut self) -> Result<()> {
@@ -848,6 +900,22 @@ impl StatsWriter for PcompressWriter {
         }
         export_diff(&mut self.writer, &self.diff);
 
+        Ok(())
+    }
+
+    fn self_loop(
+        &mut self,
+        _step: u64,
+        _graph: &Graph,
+        _partition: &Partition,
+        counts: &SelfLoopCounts,
+    ) -> Result<()> {
+        // Self-loops after the last accepted proposal: repeat the final plan
+        // as empty diffs, mirroring the pre-acceptance encoding in `step`.
+        self.diff.reset();
+        for _ in 0..counts.sum() {
+            export_diff(&mut self.writer, &self.diff);
+        }
         Ok(())
     }
 

@@ -98,7 +98,7 @@ pub fn command() -> Command {
                     \t\t(no assignment vectors)\n\
                 \tjsonl-full: JSON Lines object with basic summary statistics and a \"nodes\"\n\
                     \t\tattribute containing node assignments for recombined pairs\n\
-                \ttsv: Tab-separated assignment vectors\n\
+                \ttsv: Tab-separated accepted-proposal and self-loop statistics\n\
                 \tpcompress: Compressed binary format for post-processing with pcompress\n\
                     \t\t(old compression format)\n\
                 \tassignments: TXT output with only assignment vectors\n\

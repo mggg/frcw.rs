@@ -210,7 +210,8 @@ impl StatsWriter for RecordingWriter {
         counts: &SelfLoopCounts,
     ) -> IoResult<()> {
         self.check(graph, partition, step);
-        self.record.lock().unwrap().constraint_loops += counts.get(SelfLoopReason::ConstraintViolation);
+        self.record.lock().unwrap().constraint_loops +=
+            counts.get(SelfLoopReason::ConstraintViolation);
         Ok(())
     }
 
@@ -221,7 +222,8 @@ impl StatsWriter for RecordingWriter {
         _partition: &Partition,
         counts: &SelfLoopCounts,
     ) -> IoResult<()> {
-        self.record.lock().unwrap().constraint_loops += counts.get(SelfLoopReason::ConstraintViolation);
+        self.record.lock().unwrap().constraint_loops +=
+            counts.get(SelfLoopReason::ConstraintViolation);
         Ok(())
     }
 
@@ -260,9 +262,8 @@ fn constrained_runner_only_emits_valid_plans_and_self_loops() {
         record: record.clone(),
     });
 
-    let result = multi_chain_with_constraint(
-        &graph, &partition, writer, &params, 4, 1, false, constraint,
-    );
+    let result =
+        multi_chain_with_constraint(&graph, &partition, writer, &params, 4, 1, false, constraint);
     assert!(result.is_ok(), "chain run failed: {:?}", result);
 
     let rec = record.lock().unwrap();
