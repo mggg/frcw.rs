@@ -452,6 +452,27 @@ pub fn prepare_objective_config(
     (objective_config, objective, edge_cols)
 }
 
+/// Maps deprecated public variant names to their current spellings and warns.
+pub fn normalize_variant(variant: &str) -> &str {
+    match variant {
+        "cut-edges-rmst" => {
+            eprintln!(
+                "warning: `cut-edges-rmst` is deprecated and will be removed in a future \
+                 release; use `cut-edges-mst` instead"
+            );
+            "cut-edges-mst"
+        }
+        "district-pairs-rmst" => {
+            eprintln!(
+                "warning: `district-pairs-rmst` is deprecated and will be removed in a future \
+                 release; use `district-pairs-mst` instead"
+            );
+            "district-pairs-mst"
+        }
+        _ => variant,
+    }
+}
+
 /// Shared optimizer variant resolution. The optimizers only reach the
 /// region-aware variants by upgrading RMST when region weights are present;
 /// UST has no region-aware implementation. `reversible_error` carries each
@@ -461,12 +482,12 @@ pub fn optimizer_variant(
     region_weights: &Option<Vec<(String, f64)>>,
     reversible_error: &str,
 ) -> RecomVariant {
-    match variant_str {
-        "cut-edges-rmst" => match region_weights {
+    match normalize_variant(variant_str) {
+        "cut-edges-mst" => match region_weights {
             None => RecomVariant::CutEdgesRMST,
             Some(_) => RecomVariant::CutEdgesRegionAware,
         },
-        "district-pairs-rmst" => match region_weights {
+        "district-pairs-mst" => match region_weights {
             None => RecomVariant::DistrictPairsRMST,
             Some(_) => RecomVariant::DistrictPairsRegionAware,
         },
@@ -739,18 +760,18 @@ pub fn maximize_arg() -> Arg {
 }
 
 /// The optimizers' shared `--variant` declaration: default
-/// `district-pairs-rmst`, no reversible support.
+/// `district-pairs-mst`, no reversible support.
 pub fn optimizer_variant_arg() -> Arg {
     Arg::new("variant")
         .long("variant")
         .value_parser(value_parser!(String))
-        .default_value("district-pairs-rmst")
+        .default_value("district-pairs-mst")
         .help(
             "The variant of the ReCom proposal to use.\n\
-            \tcut-edges-rmst (ReCom-A): sample district pairs by selecting one of the cut \
+            \tcut-edges-mst (ReCom-A): sample district pairs by selecting one of the cut \
                 edges of the previous plan uniformly at random. Sample using minimum \
                 spanning trees.\n\
-            \tdistrict-pairs-rmst (ReCom-B, default): sample pairs of districts uniformly \
+            \tdistrict-pairs-mst (ReCom-B, default): sample pairs of districts uniformly \
                 at random from the space of all possible pairings. Sample using minimum \
                 spanning trees.\n\
             \tcut-edges-ust (ReCom-C): sample district pairs by selecting one of the cut \

@@ -65,7 +65,7 @@ fn bare_chain_args() -> Vec<&'static str> {
         "--rng-seed",
         "17",
         "--variant",
-        "district-pairs-rmst",
+        "district-pairs-mst",
     ]
 }
 
@@ -124,7 +124,30 @@ fn legacy_bare_chain_arguments_still_run_the_chain() {
     // The chain's jsonl writer emits the meta record on stdout.
     let stdout = String::from_utf8_lossy(&output.stdout);
     let first: Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
-    assert_eq!(first["meta"]["chain_variant"], "district-pairs-rmst");
+    assert_eq!(first["meta"]["chain_variant"], "district-pairs-mst");
+}
+
+#[test]
+fn deprecated_rmst_variants_still_run_and_warn() {
+    for (old, new) in [
+        ("cut-edges-rmst", "cut-edges-mst"),
+        ("district-pairs-rmst", "district-pairs-mst"),
+    ] {
+        let mut args = bare_chain_args();
+        *args.last_mut().unwrap() = old;
+        let output = rustrecom(&args);
+        assert!(
+            output.status.success(),
+            "stderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("`{old}` is deprecated"))
+                && stderr.contains(&format!("use `{new}` instead")),
+            "stderr:\n{stderr}"
+        );
+    }
 }
 
 #[test]

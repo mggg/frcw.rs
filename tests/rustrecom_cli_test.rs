@@ -16,7 +16,7 @@ const BASE_ARGS: &[&str] = &[
     "--rng-seed",
     "17",
     "--variant",
-    "district-pairs-rmst",
+    "district-pairs-mst",
     "--writer",
     "canonical",
 ];
@@ -49,7 +49,7 @@ fn config(writer: &str, output: Option<&str>, constraint: Option<Value>) -> Stri
         "pop_col": "population",
         "assignment_col": "district",
         "rng_seed": 17,
-        "variant": "district-pairs-rmst",
+        "variant": "district-pairs-mst",
         "writer": writer,
     });
     if let Some(path) = output {

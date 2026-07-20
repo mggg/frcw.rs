@@ -30,7 +30,7 @@ fn default_true() -> bool {
 }
 
 fn default_optimizer_variant() -> String {
-    "district-pairs-rmst".to_string()
+    "district-pairs-mst".to_string()
 }
 
 fn default_optimizer_writer() -> String {
@@ -305,7 +305,7 @@ mod tests {
             "pop_col": "TOTPOP",
             "assignment_col": "district",
             "rng_seed": 42,
-            "variant": "district-pairs-rmst"
+            "variant": "district-pairs-mst"
         })
     }
 
@@ -315,7 +315,7 @@ mod tests {
         let loaded = parse_chain_config(&raw).unwrap();
         assert_eq!(loaded.raw, raw);
         let document = loaded.document;
-        assert_eq!(document.variant, "district-pairs-rmst");
+        assert_eq!(document.variant, "district-pairs-mst");
         assert_eq!(document.n_threads, 1);
         assert_eq!(document.batch_size, 1);
         assert_eq!(document.writer, "jsonl");

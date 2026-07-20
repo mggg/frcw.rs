@@ -63,8 +63,8 @@ pub fn command() -> Command {
                     .value_parser(value_parser!(String))
                     .help(
                         "The ReCom variant to use. The options are\n\
-                \tcut-edges-rmst (ReCom-A)\n\
-                \tdistrict-pairs-rmst (ReCom-B)\n\
+                \tcut-edges-mst (ReCom-A)\n\
+                \tdistrict-pairs-mst (ReCom-B)\n\
                 \tcut-edges-ust (ReCom-C)\n\
                 \tdistrict-pairs-ust (ReCom-D)\n\
                 \tcut-edges-region-aware (Recom-AW)\n\
@@ -322,7 +322,7 @@ pub fn run(matches: &ArgMatches) -> Result<(), String> {
     // effect (the plain RMST sampler ignores them). UST and reversible variants
     // have no region-aware implementation, so reject the combination instead of
     // silently dropping the weights.
-    let variant = match variant_str {
+    let variant = match common::normalize_variant(variant_str) {
         "reversible" => match region_weights {
             None => RecomVariant::Reversible,
             Some(_) => {
@@ -335,7 +335,7 @@ pub fn run(matches: &ArgMatches) -> Result<(), String> {
                 panic!("Region-aware variants are not currently implemented for uniform spanning tree sampling.")
             }
         },
-        "cut-edges-rmst" => match region_weights {
+        "cut-edges-mst" => match region_weights {
             None => RecomVariant::CutEdgesRMST,
             Some(_) => RecomVariant::CutEdgesRegionAware,
         },
@@ -346,7 +346,7 @@ pub fn run(matches: &ArgMatches) -> Result<(), String> {
                 panic!("Region-aware variants are not currently implemented for uniform spanning tree sampling.")
             }
         },
-        "district-pairs-rmst" => match region_weights {
+        "district-pairs-mst" => match region_weights {
             None => RecomVariant::DistrictPairsRMST,
             Some(_) => RecomVariant::DistrictPairsRegionAware,
         },
