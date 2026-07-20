@@ -1,11 +1,11 @@
 //! Helpers for parsing JSON configuration strings.
 //!
-//! The chain config format mirrors the `rustrecom chain` CLI surface: field
-//! names match flag names, `variant` uses the CLI spellings, only the
-//! CLI-required arguments are required, and every optional field defaults
-//! exactly like its flag. A `version`/`command` envelope keeps the format
-//! evolvable, and unknown fields are rejected so typos (and configs written
-//! for a newer version) fail loudly instead of being silently ignored.
+//! Each subcommand's config format mirrors its CLI surface: field names match
+//! flag names, `variant` uses the CLI spellings, only the CLI-required
+//! arguments are required, and every optional field defaults exactly like its
+//! flag. A `version`/`command` envelope keeps the format evolvable, and
+//! unknown fields are rejected so typos (and configs written for a newer
+//! version) fail loudly instead of being silently ignored.
 
 use serde::Deserialize;
 use serde_json::{from_str, Value};
@@ -23,6 +23,22 @@ fn default_writer() -> String {
 
 fn default_bendl_graph_order() -> String {
     "none".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_optimizer_variant() -> String {
+    "district-pairs-rmst".to_string()
+}
+
+fn default_optimizer_writer() -> String {
+    "assignments".to_string()
+}
+
+fn default_accept_rule() -> String {
+    "linear".to_string()
 }
 
 /// A versioned `rustrecom chain` run configuration. Field names and defaults
@@ -85,7 +101,9 @@ struct ConfigEnvelope {
     command: String,
 }
 
-pub fn parse_chain_config(raw: &str) -> Result<LoadedChainConfig, String> {
+/// Parses the raw string as JSON and checks the version/command envelope for
+/// `command`, returning the full document for the per-command deserialize.
+fn checked_config_value(raw: &str, command: &str) -> Result<Value, String> {
     let value: Value =
         serde_json::from_str(raw).map_err(|error| format!("Invalid config JSON: {error}"))?;
     if !value.is_object() {
@@ -97,16 +115,151 @@ pub fn parse_chain_config(raw: &str) -> Result<LoadedChainConfig, String> {
     if envelope.version != CONFIG_VERSION {
         return Err(format!("Unsupported config version {}", envelope.version));
     }
-    if envelope.command != "chain" {
+    if envelope.command != command {
         return Err(format!(
-            "Expected command 'chain', got '{}'",
-            envelope.command
+            "Expected command '{}', got '{}'",
+            command, envelope.command
         ));
     }
+    Ok(value)
+}
 
+pub fn parse_chain_config(raw: &str) -> Result<LoadedChainConfig, String> {
+    let value = checked_config_value(raw, "chain")?;
     let document: ChainV1Config =
         serde_json::from_value(value).map_err(|error| format!("Invalid chain config: {error}"))?;
     Ok(LoadedChainConfig {
+        raw: raw.to_string(),
+        document,
+    })
+}
+
+/// A versioned `rustrecom short-bursts` run configuration. Field names and
+/// defaults mirror the short-bursts subcommand's CLI arguments one-for-one;
+/// `objective` carries the objective spec as an inline JSON object.
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ShortBurstsV1Config {
+    pub version: u64,
+    pub command: String,
+    // Required, exactly like the CLI's required arguments.
+    pub graph_json: String,
+    pub n_steps: u64,
+    pub tol: f64,
+    pub pop_col: String,
+    pub assignment_col: String,
+    pub rng_seed: u64,
+    pub burst_length: usize,
+    pub objective: Value,
+    // Optional, defaulting exactly like the CLI.
+    #[serde(default = "default_true")]
+    pub maximize: bool,
+    #[serde(default = "default_one_usize")]
+    pub n_threads: usize,
+    #[serde(default = "default_optimizer_variant")]
+    pub variant: String,
+    #[serde(default = "default_optimizer_writer")]
+    pub writer: String,
+    #[serde(default)]
+    pub sum_cols: Vec<String>,
+    #[serde(default)]
+    pub partial_sum_cols: Vec<String>,
+    #[serde(default)]
+    pub region_weights: HashMap<String, f64>,
+    #[serde(default)]
+    pub edge_weight_keys: Vec<String>,
+    #[serde(default)]
+    pub output_file: Option<String>,
+    #[serde(default)]
+    pub scores_output_file: Option<String>,
+    #[serde(default = "default_bendl_graph_order")]
+    pub bendl_graph_order: String,
+    #[serde(default)]
+    pub show_progress: bool,
+    #[serde(default)]
+    pub write_improved_scores_only: bool,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct LoadedShortBurstsConfig {
+    /// The exact input string, preserved byte-for-byte for provenance.
+    pub raw: String,
+    pub document: ShortBurstsV1Config,
+}
+
+pub fn parse_short_bursts_config(raw: &str) -> Result<LoadedShortBurstsConfig, String> {
+    let value = checked_config_value(raw, "short-bursts")?;
+    let document: ShortBurstsV1Config = serde_json::from_value(value)
+        .map_err(|error| format!("Invalid short-bursts config: {error}"))?;
+    Ok(LoadedShortBurstsConfig {
+        raw: raw.to_string(),
+        document,
+    })
+}
+
+/// A versioned `rustrecom tilted` run configuration. Field names and defaults
+/// mirror the tilted subcommand's CLI arguments one-for-one; `objective`
+/// carries the objective spec as an inline JSON object.
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TiltedV1Config {
+    pub version: u64,
+    pub command: String,
+    // Required, exactly like the CLI's required arguments.
+    pub graph_json: String,
+    pub n_steps: u64,
+    pub tol: f64,
+    pub pop_col: String,
+    pub assignment_col: String,
+    pub rng_seed: u64,
+    pub objective: Value,
+    // Optional, defaulting exactly like the CLI.
+    #[serde(default = "default_accept_rule")]
+    pub accept_rule: String,
+    #[serde(default)]
+    pub accept_worse_prob: Option<f64>,
+    #[serde(default)]
+    pub acceptance_beta: Option<f64>,
+    #[serde(default = "default_true")]
+    pub maximize: bool,
+    #[serde(default = "default_one_usize")]
+    pub n_threads: usize,
+    #[serde(default = "default_optimizer_variant")]
+    pub variant: String,
+    #[serde(default = "default_optimizer_writer")]
+    pub writer: String,
+    #[serde(default)]
+    pub sum_cols: Vec<String>,
+    #[serde(default)]
+    pub partial_sum_cols: Vec<String>,
+    #[serde(default)]
+    pub region_weights: HashMap<String, f64>,
+    #[serde(default)]
+    pub edge_weight_keys: Vec<String>,
+    #[serde(default)]
+    pub output_file: Option<String>,
+    #[serde(default)]
+    pub scores_output_file: Option<String>,
+    #[serde(default = "default_bendl_graph_order")]
+    pub bendl_graph_order: String,
+    #[serde(default)]
+    pub show_progress: bool,
+    #[serde(default)]
+    pub write_improved_scores_only: bool,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct LoadedTiltedConfig {
+    /// The exact input string, preserved byte-for-byte for provenance.
+    pub raw: String,
+    pub document: TiltedV1Config,
+}
+
+pub fn parse_tilted_config(raw: &str) -> Result<LoadedTiltedConfig, String> {
+    let value = checked_config_value(raw, "tilted")?;
+    let document: TiltedV1Config =
+        serde_json::from_value(value).map_err(|error| format!("Invalid tilted config: {error}"))?;
+    Ok(LoadedTiltedConfig {
         raw: raw.to_string(),
         document,
     })

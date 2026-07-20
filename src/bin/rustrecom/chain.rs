@@ -8,7 +8,7 @@
 //! BENDL Metadata asset, or a `<stem>_metadata.jsonl` sidecar).
 
 use crate::common;
-use clap::{parser::ValueSource, value_parser, Arg, ArgAction, ArgMatches, Command};
+use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
 use rustrecom::config::{parse_chain_config, region_weights_from_map, LoadedChainConfig};
 use rustrecom::constraints::{make_constraint, make_constraint_value, ConstraintConfig};
 use rustrecom::recom::run::multi_chain_with_constraint;
@@ -18,28 +18,13 @@ use serde_json::json;
 use std::fs;
 use std::io::{self, Write};
 
-/// Marks an argument as required only in CLI mode; config mode supplies it
-/// from the config document instead.
-fn config_optional(arg: Arg) -> Arg {
-    arg.required(false).required_unless_present("config")
-}
-
 pub fn command() -> Command {
     let mut cli =
         Command::new("chain")
             .about("A minimal implementation of the ReCom Markov chain")
-            .arg(
-                Arg::new("config")
-                    .long("config")
-                    .value_parser(value_parser!(String))
-                    .help(
-                        "Run from a versioned JSON config whose fields mirror the CLI \
-                        arguments. Either a JSON string (must start with '{'), a path \
-                        to a JSON file, or '-' to read the JSON from stdin.",
-                    ),
-            )
-            .arg(config_optional(common::graph_json_arg()))
-            .arg(config_optional(
+            .arg(common::config_arg())
+            .arg(common::config_optional(common::graph_json_arg()))
+            .arg(common::config_optional(
                 Arg::new("n_steps")
                     .long("n-steps")
                     .value_parser(value_parser!(u64))
@@ -51,10 +36,10 @@ pub fn command() -> Command {
                     .value_parser(value_parser!(u64))
                     .help("The target population for the districts."),
             )
-            .arg(config_optional(common::tol_arg()))
-            .arg(config_optional(common::pop_col_arg()))
-            .arg(config_optional(common::assignment_col_arg()))
-            .arg(config_optional(common::rng_seed_arg()))
+            .arg(common::config_optional(common::tol_arg()))
+            .arg(common::config_optional(common::pop_col_arg()))
+            .arg(common::config_optional(common::assignment_col_arg()))
+            .arg(common::config_optional(common::rng_seed_arg()))
             .arg(
                 Arg::new("balance_ub")
                     .long("balance-ub")
@@ -72,7 +57,7 @@ pub fn command() -> Command {
                     .default_value("1")
                     .help("The number of proposals per batch job."),
             )
-            .arg(config_optional(
+            .arg(common::config_optional(
                 Arg::new("variant")
                     .long("variant")
                     .value_parser(value_parser!(String))
@@ -143,34 +128,6 @@ pub fn command() -> Command {
         );
     }
     cli
-}
-
-/// Arguments that may accompany `--config`. `overwrite-output` is output-lifecycle
-/// policy rather than a sampler value: it has no v1 config field, and wrappers
-/// driving config mode need it to keep the clobbering behavior of the shell
-/// redirects it replaces.
-const CONFIG_MODE_COMPANION_ARGS: &[&str] = &["config", "overwrite-output"];
-
-/// Reject config mode combined with any explicitly supplied CLI argument.
-///
-/// The argument set is read back off the parsed `ArgMatches` rather than listed here,
-/// so a newly added CLI option is covered without touching this function. `value_source`
-/// distinguishes a value the user typed from one clap supplied as a default, which a
-/// raw argv scan or a `get_one` check cannot do.
-fn reject_mixed_config_args(matches: &ArgMatches) {
-    let mut mixed = matches
-        .ids()
-        .map(|id| id.as_str())
-        .filter(|id| !CONFIG_MODE_COMPANION_ARGS.contains(id))
-        .filter(|id| matches.value_source(id) == Some(ValueSource::CommandLine))
-        .collect::<Vec<_>>();
-    mixed.sort_unstable();
-    if !mixed.is_empty() {
-        panic!(
-            "--config cannot be combined with CLI arguments: {}",
-            mixed.join(", ")
-        );
-    }
 }
 
 struct ResolvedChainArgs {
@@ -320,21 +277,13 @@ impl ResolvedChainArgs {
 pub fn run(matches: &ArgMatches) -> Result<(), String> {
     let overwrite_output = matches.get_flag("overwrite-output");
     // Mixed CLI arguments are rejected before anything is loaded.
-    let resolved = if let Some(config_arg) = matches.get_one::<String>("config") {
-        reject_mixed_config_args(matches);
-        let raw = if config_arg == "-" {
-            let mut buffer = String::new();
-            io::Read::read_to_string(&mut io::stdin(), &mut buffer)
-                .unwrap_or_else(|error| panic!("Could not read config from stdin: {error}"));
-            buffer
-        } else {
-            common::load_json_arg(config_arg, "config")
-        };
-        let loaded =
-            parse_chain_config(&raw).unwrap_or_else(|error| panic!("Config error: {error}"));
-        ResolvedChainArgs::from_config(loaded)
-    } else {
-        ResolvedChainArgs::from_cli(matches)
+    let resolved = match common::resolve_config_argument(matches) {
+        Some(raw) => {
+            let loaded =
+                parse_chain_config(&raw).unwrap_or_else(|error| panic!("Config error: {error}"));
+            ResolvedChainArgs::from_config(loaded)
+        }
+        None => ResolvedChainArgs::from_cli(matches),
     };
     let ResolvedChainArgs {
         graph_path,

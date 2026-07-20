@@ -290,23 +290,19 @@ pub fn enrich_bendl_meta(
 /// paths, and every overwrite check before any destination is opened. The
 /// sidecar is suppressed (`None`) in bendl mode.
 pub fn plan_optimizer_output_paths(
-    matches: &ArgMatches,
+    output_file: Option<&str>,
+    scores_output_file: Option<&str>,
     is_bendl: bool,
     overwrite_output: bool,
 ) -> Option<PathBuf> {
-    let metadata_base_path = matches
-        .get_one::<String>("output-file")
-        .or_else(|| matches.get_one::<String>("scores-output-file"));
+    let metadata_base_path = output_file.or(scores_output_file);
     let metadata_path = if is_bendl {
         None
     } else {
-        metadata_base_path.map(|path| metadata_path(path))
+        metadata_base_path.map(metadata_path)
     };
 
-    if let (Some(output_path), Some(scores_path)) = (
-        matches.get_one::<String>("output-file"),
-        matches.get_one::<String>("scores-output-file"),
-    ) {
+    if let (Some(output_path), Some(scores_path)) = (output_file, scores_output_file) {
         if PathBuf::from(output_path) == PathBuf::from(scores_path) {
             panic!(
                 "Parameter error: '--output-file' and '--scores-output-file' must be different."
@@ -314,21 +310,15 @@ pub fn plan_optimizer_output_paths(
         }
     }
     if let Some(metadata_path) = &metadata_path {
-        if matches
-            .get_one::<String>("output-file")
-            .is_some_and(|path| PathBuf::from(path) == *metadata_path)
-            || matches
-                .get_one::<String>("scores-output-file")
-                .is_some_and(|path| PathBuf::from(path) == *metadata_path)
+        if output_file.is_some_and(|path| PathBuf::from(path) == *metadata_path)
+            || scores_output_file.is_some_and(|path| PathBuf::from(path) == *metadata_path)
         {
             panic!("Parameter error: derived metadata path conflicts with an output path.");
         }
     }
     let output_paths = [
-        matches.get_one::<String>("output-file").map(PathBuf::from),
-        matches
-            .get_one::<String>("scores-output-file")
-            .map(PathBuf::from),
+        output_file.map(PathBuf::from),
+        scores_output_file.map(PathBuf::from),
         metadata_path.clone(),
     ];
     for path in output_paths.into_iter().flatten() {
@@ -340,10 +330,39 @@ pub fn plan_optimizer_output_paths(
 /// Column inputs shared by the two optimizers, parsed in their common order.
 pub struct OptimizerInputs {
     pub graph_json: String,
+    pub pop_col: String,
+    pub assignment_col: String,
     pub sum_cols: Vec<String>,
     pub partial_cols: Vec<String>,
     pub edge_weight_keys: Vec<String>,
     pub region_weights: Option<Vec<(String, f64)>>,
+}
+
+impl OptimizerInputs {
+    /// Builds the inputs from already-resolved config values, applying the
+    /// same canonicalization and region-weight merging as the CLI path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_config_values(
+        graph_path: &str,
+        pop_col: String,
+        assignment_col: String,
+        mut sum_cols: Vec<String>,
+        partial_cols: Vec<String>,
+        edge_weight_keys: Vec<String>,
+        region_weights: Option<Vec<(String, f64)>>,
+    ) -> Self {
+        let graph_json = canonicalize_graph_path(graph_path);
+        merge_region_weight_cols(&mut sum_cols, &region_weights);
+        OptimizerInputs {
+            graph_json,
+            pop_col,
+            assignment_col,
+            sum_cols,
+            partial_cols,
+            edge_weight_keys,
+            region_weights,
+        }
+    }
 }
 
 pub fn parse_optimizer_inputs(matches: &ArgMatches) -> OptimizerInputs {
@@ -351,6 +370,14 @@ pub fn parse_optimizer_inputs(matches: &ArgMatches) -> OptimizerInputs {
         .get_one::<String>("graph_json")
         .expect("graph_json is required");
     let graph_json = canonicalize_graph_path(graph_path);
+    let pop_col = matches
+        .get_one::<String>("pop_col")
+        .expect("pop_col is required")
+        .clone();
+    let assignment_col = matches
+        .get_one::<String>("assignment_col")
+        .expect("assignment_col is required")
+        .clone();
     let mut sum_cols: Vec<String> = matches
         .get_many::<String>("sum_cols")
         .unwrap_or_default()
@@ -371,6 +398,8 @@ pub fn parse_optimizer_inputs(matches: &ArgMatches) -> OptimizerInputs {
     merge_region_weight_cols(&mut sum_cols, &region_weights);
     OptimizerInputs {
         graph_json,
+        pop_col,
+        assignment_col,
         sum_cols,
         partial_cols,
         edge_weight_keys,
@@ -394,6 +423,15 @@ pub fn prepare_objective(
             .expect("objective is required"),
         "objective file",
     );
+    prepare_objective_config(objective_config, inputs)
+}
+
+/// Core of [`prepare_objective`] for callers that already hold the objective
+/// JSON string (config mode carries it as an inline object).
+pub fn prepare_objective_config(
+    objective_config: String,
+    inputs: &mut OptimizerInputs,
+) -> (String, ObjectiveConfig, Vec<String>) {
     let objective = make_objective(&objective_config);
     let mut edge_cols = required_edge_cols(&objective_config);
     for key in inputs.edge_weight_keys.iter() {
@@ -458,37 +496,46 @@ pub struct OptimizerWriters {
 /// optimizers' shared order: sidecar first, then the stats destination, then
 /// the scores destination. The sidecar is suppressed in bendl mode
 /// (`metadata_path` is `None`); the same provenance lives in the bundle's
-/// Metadata asset.
+/// Metadata asset. In config mode (`raw_config` is `Some`) the sidecar and
+/// the bendl Metadata asset carry the exact raw config string instead of the
+/// meta record, preserving provenance byte-for-byte.
+#[allow(clippy::too_many_arguments)]
 pub fn build_optimizer_writers(
-    matches: &ArgMatches,
+    output_file: Option<&str>,
+    scores_output_file: Option<&str>,
     is_bendl: bool,
     writer_str: &str,
     overwrite_output: bool,
     metadata_path: &Option<PathBuf>,
     meta: &Value,
     embed_bytes: Option<Vec<u8>>,
+    raw_config: Option<&str>,
 ) -> OptimizerWriters {
     let mut metadata_writer: Option<Box<dyn io::Write + Send>> = metadata_path
         .as_ref()
         .map(|path| output_buffer(path.to_str().unwrap(), overwrite_output));
     if let Some(writer) = metadata_writer.as_mut() {
         use std::io::Write;
-        writeln!(writer, "{}", json!({ "meta": meta })).unwrap();
+        match raw_config {
+            Some(raw) => writeln!(writer, "{}", raw).unwrap(),
+            None => writeln!(writer, "{}", json!({ "meta": meta })).unwrap(),
+        }
         writer.flush().unwrap();
     }
 
     let stats: Option<Box<dyn StatsWriter>> = if is_bendl {
-        let path = matches
-            .get_one::<String>("output-file")
-            .expect("bendl requires --output-file");
+        let path = output_file.expect("bendl requires --output-file");
         let bundle_file = bendl_output_file(path, overwrite_output);
+        let metadata = raw_config
+            .map(|raw| raw.as_bytes().to_vec())
+            .unwrap_or_else(|| meta.to_string().into_bytes());
         Some(Box::new(BendlBenStreamWriter::new(
             bundle_file,
             embed_bytes.expect("bendl computes the embed bytes"),
-            meta.to_string().into_bytes(),
+            metadata,
         )))
     } else {
-        match matches.get_one::<String>("output-file") {
+        match output_file {
             Some(path) => Some(make_stats_writer(
                 writer_str,
                 false,
@@ -503,10 +550,75 @@ pub fn build_optimizer_writers(
             }
         }
     };
-    let scores: Option<ScoresWriter> = matches
-        .get_one::<String>("scores-output-file")
-        .map(|path| ScoresWriter::new(output_buffer(path, overwrite_output)));
+    let scores: Option<ScoresWriter> =
+        scores_output_file.map(|path| ScoresWriter::new(output_buffer(path, overwrite_output)));
     OptimizerWriters { stats, scores }
+}
+
+// ---------------------------------------------------------------------------
+// Config-mode helpers shared by all subcommands.
+// ---------------------------------------------------------------------------
+
+/// Marks an argument as required only in CLI mode; config mode supplies it
+/// from the config document instead.
+pub fn config_optional(arg: Arg) -> Arg {
+    arg.required(false).required_unless_present("config")
+}
+
+/// The shared `--config` declaration.
+pub fn config_arg() -> Arg {
+    Arg::new("config")
+        .long("config")
+        .value_parser(value_parser!(String))
+        .help(
+            "Run from a versioned JSON config whose fields mirror the CLI \
+            arguments. Either a JSON string (must start with '{'), a path \
+            to a JSON file, or '-' to read the JSON from stdin.",
+        )
+}
+
+/// Arguments that may accompany `--config`. `overwrite-output` is output-lifecycle
+/// policy rather than a sampler value: it has no v1 config field, and wrappers
+/// driving config mode need it to keep the clobbering behavior of the shell
+/// redirects it replaces.
+const CONFIG_MODE_COMPANION_ARGS: &[&str] = &["config", "overwrite-output"];
+
+/// Reject config mode combined with any explicitly supplied CLI argument.
+///
+/// The argument set is read back off the parsed `ArgMatches` rather than listed here,
+/// so a newly added CLI option is covered without touching this function. `value_source`
+/// distinguishes a value the user typed from one clap supplied as a default, which a
+/// raw argv scan or a `get_one` check cannot do.
+pub fn reject_mixed_config_args(matches: &ArgMatches) {
+    let mut mixed = matches
+        .ids()
+        .map(|id| id.as_str())
+        .filter(|id| !CONFIG_MODE_COMPANION_ARGS.contains(id))
+        .filter(|id| matches.value_source(id) == Some(clap::parser::ValueSource::CommandLine))
+        .collect::<Vec<_>>();
+    mixed.sort_unstable();
+    if !mixed.is_empty() {
+        panic!(
+            "--config cannot be combined with CLI arguments: {}",
+            mixed.join(", ")
+        );
+    }
+}
+
+/// Resolves the `--config` argument to its raw string: inline JSON, stdin
+/// (`-`), or a file path. Rejects mixed CLI arguments before reading anything.
+pub fn resolve_config_argument(matches: &ArgMatches) -> Option<String> {
+    let config_arg = matches.get_one::<String>("config")?;
+    reject_mixed_config_args(matches);
+    let raw = if config_arg == "-" {
+        let mut buffer = String::new();
+        io::Read::read_to_string(&mut io::stdin(), &mut buffer)
+            .unwrap_or_else(|error| panic!("Could not read config from stdin: {error}"));
+        buffer
+    } else {
+        load_json_arg(config_arg, "config")
+    };
+    Some(raw)
 }
 
 // ---------------------------------------------------------------------------
