@@ -19,50 +19,49 @@ use std::fs;
 use std::io::{self, Write};
 
 pub fn command() -> Command {
-    let mut cli =
-        Command::new("chain")
-            .about("A minimal implementation of the ReCom Markov chain")
-            .arg(common::config_arg())
-            .arg(common::config_optional(common::graph_json_arg()))
-            .arg(common::config_optional(
-                Arg::new("n_steps")
-                    .long("n-steps")
-                    .value_parser(value_parser!(u64))
-                    .help("The number of proposals to generate."),
-            ))
-            .arg(
-                Arg::new("target_pop")
-                    .long("target-pop")
-                    .value_parser(value_parser!(u64))
-                    .help("The target population for the districts."),
-            )
-            .arg(common::config_optional(common::tol_arg()))
-            .arg(common::config_optional(common::pop_col_arg()))
-            .arg(common::config_optional(common::assignment_col_arg()))
-            .arg(common::config_optional(common::rng_seed_arg()))
-            .arg(
-                Arg::new("balance_ub")
-                    .long("balance-ub")
-                    .short('M') // Variable used in RevReCom paper
-                    .value_parser(value_parser!(u32))
-                    .default_value("0")
-                    .help("The normalizing constant (reversible ReCom only)."),
-            )
-            .arg(common::n_threads_arg())
-            .arg(
-                Arg::new("batch_size")
-                    .long("batch-size")
-                    .required(false)
-                    .value_parser(value_parser!(usize))
-                    .default_value("1")
-                    .help("The number of proposals per batch job."),
-            )
-            .arg(common::config_optional(
-                Arg::new("variant")
-                    .long("variant")
-                    .value_parser(value_parser!(String))
-                    .help(
-                        "The ReCom variant to use. The options are\n\
+    let mut cli = Command::new("chain")
+        .about("A minimal implementation of the ReCom Markov chain")
+        .arg(common::config_arg())
+        .arg(common::config_optional(common::graph_json_arg()))
+        .arg(common::config_optional(
+            Arg::new("n_steps")
+                .long("n-steps")
+                .value_parser(value_parser!(u64))
+                .help("The number of proposals to generate."),
+        ))
+        .arg(
+            Arg::new("target_pop")
+                .long("target-pop")
+                .value_parser(value_parser!(u64))
+                .help("The target population for the districts."),
+        )
+        .arg(common::config_optional(common::tol_arg()))
+        .arg(common::config_optional(common::pop_col_arg()))
+        .arg(common::config_optional(common::assignment_col_arg()))
+        .arg(common::config_optional(common::rng_seed_arg()))
+        .arg(
+            Arg::new("balance_ub")
+                .long("balance-ub")
+                .short('M') // Variable used in RevReCom paper
+                .value_parser(value_parser!(u32))
+                .default_value("0")
+                .help("The normalizing constant (reversible ReCom only)."),
+        )
+        .arg(common::n_threads_arg())
+        .arg(
+            Arg::new("batch_size")
+                .long("batch-size")
+                .required(false)
+                .value_parser(value_parser!(usize))
+                .default_value("1")
+                .help("The number of proposals per batch job."),
+        )
+        .arg(common::config_optional(
+            Arg::new("variant")
+                .long("variant")
+                .value_parser(value_parser!(String))
+                .help(
+                    "The ReCom variant to use. The options are\n\
                 \tcut-edges-mst (ReCom-A)\n\
                 \tdistrict-pairs-mst (ReCom-B)\n\
                 \tcut-edges-ust (ReCom-C)\n\
@@ -70,15 +69,15 @@ pub fn command() -> Command {
                 \tcut-edges-region-aware (Recom-AW)\n\
                 \tdistrict-pairs-region-aware (Recom-BW)\n\
                 \treversible (RevReCom)",
-                    ),
-            ))
-            .arg(
-                Arg::new("writer")
-                    .long("writer")
-                    .value_parser(value_parser!(String))
-                    .default_value("jsonl")
-                    .help(
-                        "The output writer to use.\n\
+                ),
+        ))
+        .arg(
+            Arg::new("writer")
+                .long("writer")
+                .value_parser(value_parser!(String))
+                .default_value("jsonl")
+                .help(
+                    "The output writer to use.\n\
                 \tjsonl (default): JSON Lines with basic summary statistics \n\
                     \t\t(no assignment vectors)\n\
                 \tjsonl-full: JSON Lines object with basic summary statistics and a \"nodes\"\n\
@@ -95,29 +94,42 @@ pub fn command() -> Command {
                     storing ensembles).\n\
                 \tbendl: Self-describing BENDL file (graph + metadata + BEN stream in one \
                     file). Requires --output-file.",
-                    ),
-            )
-            .arg(common::sum_cols_arg())
-            .arg(
-                Arg::new("constraint")
-                    .long("constraint")
-                    .required(false)
-                    .help("Constraint config as inline JSON or a path to a JSON file."),
-            )
-            .arg(common::region_weights_arg())
-            .arg(common::edge_weight_keys_arg())
-            .arg(
-                Arg::new("cut_edges_count")
-                    .long("cut-edges-count")
-                    .action(ArgAction::SetTrue)
-                    .help("Whether to compute and output the cut edges count at each step."),
-            )
-            .arg(Arg::new("output-file").long("output-file").short('o').help(
+                ),
+        )
+        .arg(common::sum_cols_arg())
+        .arg(
+            Arg::new("constraint")
+                .long("constraint")
+                .required(false)
+                .help("Constraint config as inline JSON or a path to a JSON file."),
+        )
+        .arg(common::region_weights_arg())
+        .arg(common::edge_weight_keys_arg())
+        .arg(
+            Arg::new("cut_edges_count")
+                .long("cut-edges-count")
+                .action(ArgAction::SetTrue)
+                .help("Whether to compute and output the cut edges count at each step."),
+        )
+        .arg(
+            Arg::new("output-file").long("output-file").short('o').help(
                 "The path to write the output to. If not provided, ouput is printed to console.",
-            ))
-            .arg(common::overwrite_output_arg())
-            .arg(common::show_progress_arg())
-            .arg(common::bendl_graph_order_arg());
+            ),
+        )
+        .arg(common::overwrite_output_arg())
+        .arg(common::show_progress_arg())
+        .arg(
+            Arg::new("sample_interval")
+                .long("sample-interval")
+                .value_parser(value_parser!(u64).range(1..))
+                .default_value("1")
+                .help(
+                    "Emit the seed and every Kth chain position. Supported by the plan writers: \
+                         assignments, canonicalized-assignments, canonical, ben, bendl, and \
+                         pcompress.",
+                ),
+        )
+        .arg(common::bendl_graph_order_arg());
 
     if cfg!(feature = "linalg") {
         cli = cli.arg(
@@ -149,6 +161,7 @@ struct ResolvedChainArgs {
     region_weights: Option<Vec<(String, f64)>>,
     edge_weight_keys: Vec<String>,
     cut_edges_count: bool,
+    sample_interval: u64,
     output_file: Option<String>,
     bendl_graph_order: String,
     show_progress: bool,
@@ -222,6 +235,9 @@ impl ResolvedChainArgs {
                 .cloned()
                 .collect(),
             cut_edges_count: matches.get_flag("cut_edges_count"),
+            sample_interval: *matches
+                .get_one::<u64>("sample_interval")
+                .expect("sample_interval has a default value"),
             output_file: matches.get_one::<String>("output-file").cloned(),
             bendl_graph_order: matches
                 .get_one::<String>("bendl_graph_order")
@@ -265,6 +281,7 @@ impl ResolvedChainArgs {
             region_weights,
             edge_weight_keys: document.edge_weight_keys,
             cut_edges_count: document.cut_edges_count,
+            sample_interval: document.sample_interval,
             output_file: document.output_file,
             bendl_graph_order: document.bendl_graph_order,
             show_progress: document.show_progress,
@@ -304,6 +321,7 @@ pub fn run(matches: &ArgMatches) -> Result<(), String> {
         region_weights,
         edge_weight_keys,
         cut_edges_count,
+        sample_interval,
         output_file,
         bendl_graph_order,
         show_progress,
@@ -316,6 +334,26 @@ pub fn run(matches: &ArgMatches) -> Result<(), String> {
     let assignment_col = assignment_col.as_str();
     let variant_str = variant.as_str();
     let writer_str = writer.as_str();
+
+    if sample_interval == 0 {
+        panic!("Parameter error: '--sample-interval' must be at least 1.");
+    }
+    if sample_interval > 1
+        && !matches!(
+            writer_str,
+            "assignments"
+                | "canonicalized-assignments"
+                | "canonical"
+                | "ben"
+                | "bendl"
+                | "pcompress"
+        )
+    {
+        panic!(
+            "Parameter error: '--sample-interval' is only supported by assignment-producing \
+             writers (assignments, canonicalized-assignments, canonical, ben, bendl, pcompress)."
+        );
+    }
 
     // When region weights are supplied, transparently upgrade the RMST/cut-edges
     // variants to their region-aware counterparts so the weights actually take
@@ -451,6 +489,11 @@ pub fn run(matches: &ArgMatches) -> Result<(), String> {
         "graph_json": graph_json,
         "chain_variant": variant_str,
     });
+    if sample_interval > 1 {
+        meta.as_object_mut()
+            .unwrap()
+            .insert("sample_interval".to_string(), json!(sample_interval));
+    }
     if let Some(path) = &output_file {
         meta.as_object_mut()
             .unwrap()
@@ -501,11 +544,14 @@ pub fn run(matches: &ArgMatches) -> Result<(), String> {
             .as_ref()
             .map(|raw| raw.as_bytes().to_vec())
             .unwrap_or_else(|| meta.to_string().into_bytes());
-        Box::new(BendlBenStreamWriter::new(
-            bundle_file,
-            embed_bytes.expect("bendl computes the embed bytes"),
-            metadata,
-        ))
+        Box::new(
+            BendlBenStreamWriter::new(
+                bundle_file,
+                embed_bytes.expect("bendl computes the embed bytes"),
+                metadata,
+            )
+            .with_sample_interval(sample_interval),
+        )
     } else {
         let mut output_buffer: Box<dyn io::Write + Send> = match &output_file {
             Some(path) => common::output_buffer(path, overwrite_output),
@@ -518,7 +564,13 @@ pub fn run(matches: &ArgMatches) -> Result<(), String> {
             let metadata = json!({"meta": {"config": raw}});
             writeln!(output_buffer, "{metadata}").expect("Could not write metadata record");
         }
-        common::make_stats_writer(writer_str, st_counts, cut_edges_count, output_buffer)
+        common::make_stats_writer(
+            writer_str,
+            st_counts,
+            cut_edges_count,
+            sample_interval,
+            output_buffer,
+        )
     };
 
     multi_chain_with_constraint(

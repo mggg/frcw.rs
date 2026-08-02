@@ -17,6 +17,10 @@ fn default_one_usize() -> usize {
     1
 }
 
+fn default_one_u64() -> u64 {
+    1
+}
+
 fn default_writer() -> String {
     "jsonl".to_string()
 }
@@ -75,6 +79,8 @@ pub struct ChainV1Config {
     pub edge_weight_keys: Vec<String>,
     #[serde(default)]
     pub cut_edges_count: bool,
+    #[serde(default = "default_one_u64")]
+    pub sample_interval: u64,
     #[serde(default)]
     pub output_file: Option<String>,
     #[serde(default = "default_bendl_graph_order")]
@@ -318,6 +324,7 @@ mod tests {
         assert_eq!(document.variant, "district-pairs-mst");
         assert_eq!(document.n_threads, 1);
         assert_eq!(document.batch_size, 1);
+        assert_eq!(document.sample_interval, 1);
         assert_eq!(document.writer, "jsonl");
         assert_eq!(document.bendl_graph_order, "none");
         assert_eq!(document.balance_ub, 0);

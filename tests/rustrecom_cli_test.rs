@@ -107,6 +107,63 @@ fn config_mode_matches_cli_stdout() {
 }
 
 #[test]
+fn default_metadata_does_not_claim_subsampling() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustrecom"))
+        .args(&BASE_ARGS[..BASE_ARGS.len() - 2])
+        .args(["--writer", "jsonl"])
+        .output()
+        .expect("run rustrecom");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let metadata: Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
+    assert!(metadata["meta"].get("sample_interval").is_none());
+}
+
+#[test]
+fn sample_interval_keeps_seed_and_original_sample_numbers() {
+    let output = run_chain(&["--sample-interval", "7"]);
+    let samples = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line).unwrap()["sample"]
+                .as_u64()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(samples, vec![1, 8, 15, 22]);
+}
+
+#[test]
+fn config_sample_interval_matches_cli() {
+    let mut document: Value = serde_json::from_str(&config("canonical", None, None)).unwrap();
+    document["sample_interval"] = json!(7);
+    let output = run_config(&document.to_string(), &[]);
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, run_chain(&["--sample-interval", "7"]));
+}
+
+#[test]
+fn sample_interval_rejects_invalid_values_and_writers() {
+    let mut document: Value = serde_json::from_str(&config("jsonl", None, None)).unwrap();
+    document["sample_interval"] = json!(2);
+    let output = run_config(&document.to_string(), &[]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("only supported by assignment-producing writers"));
+
+    let mut document: Value = serde_json::from_str(&config("canonical", None, None)).unwrap();
+    document["sample_interval"] = json!(0);
+    let output = run_config(&document.to_string(), &[]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("must be at least 1"));
+}
+
+#[test]
 fn config_file_argument_matches_inline_config() {
     let config_path = temp_output("config_file", "config.json");
     let raw = config("canonical", None, None);

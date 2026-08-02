@@ -95,6 +95,7 @@ pub fn make_stats_writer(
     writer_str: &str,
     st_counts: bool,
     cut_edges_count: bool,
+    sample_interval: u64,
     output_buffer: Box<dyn io::Write + Send>,
 ) -> Box<dyn StatsWriter> {
     match writer_str {
@@ -111,11 +112,19 @@ pub fn make_stats_writer(
             cut_edges_count,
             output_buffer,
         )),
-        "pcompress" => Box::new(PcompressWriter::new(output_buffer)),
-        "assignments" => Box::new(AssignmentsOnlyWriter::new(false, output_buffer)),
-        "canonicalized-assignments" => Box::new(AssignmentsOnlyWriter::new(true, output_buffer)),
-        "canonical" => Box::new(CanonicalWriter::new(output_buffer)),
-        "ben" => Box::new(BenWriter::new(output_buffer)),
+        "pcompress" => {
+            Box::new(PcompressWriter::new(output_buffer).with_sample_interval(sample_interval))
+        }
+        "assignments" => Box::new(
+            AssignmentsOnlyWriter::new(false, output_buffer).with_sample_interval(sample_interval),
+        ),
+        "canonicalized-assignments" => Box::new(
+            AssignmentsOnlyWriter::new(true, output_buffer).with_sample_interval(sample_interval),
+        ),
+        "canonical" => {
+            Box::new(CanonicalWriter::new(output_buffer).with_sample_interval(sample_interval))
+        }
+        "ben" => Box::new(BenWriter::new(output_buffer).with_sample_interval(sample_interval)),
         bad => panic!("Parameter error: invalid writer '{}'", bad),
     }
 }
@@ -561,6 +570,7 @@ pub fn build_optimizer_writers(
                 writer_str,
                 false,
                 false,
+                1,
                 output_buffer(path, overwrite_output),
             )),
             None => {

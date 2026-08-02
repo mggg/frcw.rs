@@ -49,6 +49,22 @@ pub trait StatsWriter: Send {
     fn close(&mut self) -> Result<()>;
 }
 
+fn sampled_steps(start: u64, end: u64, interval: u64) -> impl Iterator<Item = u64> {
+    debug_assert!(interval > 0);
+    let offset = (interval - start % interval) % interval;
+    let first = start.checked_add(offset).filter(move |&step| step <= end);
+    std::iter::successors(first, move |&step| {
+        step.checked_add(interval).filter(|&next| next <= end)
+    })
+}
+
+fn sampled_step_count(start: u64, end: u64, interval: u64) -> u64 {
+    let Some(first) = sampled_steps(start, end, interval).next() else {
+        return 0;
+    };
+    1 + (end - first) / interval
+}
+
 /// Writes chain statistics in TSV (tab-separated values) format.
 /// Each accepted proposal in the chain is a line; no statistics are saved
 /// about the initial partition.
@@ -84,8 +100,10 @@ pub struct AssignmentsOnlyWriter {
     canonicalize: bool,
     /// The last assignment vector written.
     previous_assignment: Vec<u32>,
-    /// The last chain step written.
+    /// The last chain step covered by a writer callback.
     last_step: u64,
+    /// Emit only chain positions divisible by this value.
+    sample_interval: u64,
     /// The output stream that we would like to write to.
     output: Box<dyn Write + Send>,
 }
@@ -104,11 +122,13 @@ pub struct AssignmentsOnlyWriter {
 pub struct CanonicalWriter {
     /// The previous assignment vector. Used to fill in self loops.
     previous_assignment: Vec<u32>,
-    /// The last chain step number that has been written. The chain is
+    /// The last chain step covered by a writer callback. The chain is
     /// 0-indexed (seed at step 0); the writer stamps `sample = step + 1`
     /// so output line count and terminal sample number both equal
     /// `num_steps` under the runner contract.
     last_step: u64,
+    /// Emit only chain positions divisible by this value.
+    sample_interval: u64,
     /// The output stream that we would like to write to.
     output: Box<dyn Write + Send>,
 }
@@ -116,17 +136,20 @@ pub struct CanonicalWriter {
 /// Shared TwoDelta frame bookkeeping for the `ben` and `bendl` writers.
 ///
 /// Holds the single buffered plan whose repeat count is not yet known and the
-/// trailing self-loop tally at the final plan, and accumulates the true total
-/// sample count. Both writers delegate their frame emission here so the count
-/// logic (including the `u16`-overflow split below) lives in one place.
+/// chain positions covered so far, and accumulates the true total sample count.
+/// Both writers delegate their frame emission here so the count logic (including
+/// the `u16`-overflow split below) lives in one place.
 struct TwoDeltaFrameBuffer {
     /// The plan whose frame is buffered, held as the `u16` labels BEN packs. Its
     /// repeat count is only known once the chain moves off it (the next `step`)
     /// or the chain ends (the final flush).
     pending_assignment: Vec<u16>,
-    /// Self-loop count accumulated at the final plan after the last accepted
-    /// step, folded into the final segment's count by the final flush.
-    trailing_self_loops: u64,
+    /// Chain step at which `pending_assignment` became current.
+    pending_step: u64,
+    /// Last chain position covered by writer callbacks.
+    final_step: u64,
+    /// Emit only chain positions divisible by this value.
+    sample_interval: u64,
     /// Running sum of every emitted frame count: the true total sample count,
     /// stamped into the BENDL header so readers can trust it.
     total_samples: u64,
@@ -136,9 +159,16 @@ impl TwoDeltaFrameBuffer {
     fn new() -> TwoDeltaFrameBuffer {
         TwoDeltaFrameBuffer {
             pending_assignment: Vec::new(),
-            trailing_self_loops: 0,
+            pending_step: 0,
+            final_step: 0,
+            sample_interval: 1,
             total_samples: 0,
         }
+    }
+
+    fn set_sample_interval(&mut self, sample_interval: u64) {
+        assert!(sample_interval > 0, "sample interval must be positive");
+        self.sample_interval = sample_interval;
     }
 
     /// Buffer the initial plan (from `init`); its count is filled later.
@@ -146,32 +176,44 @@ impl TwoDeltaFrameBuffer {
         self.pending_assignment = assignment;
     }
 
-    /// The chain left the pending plan via an accepted step: emit the pending
-    /// plan with count `self_loops + 1` (the rejections spent there plus the
-    /// move to `next`), then buffer `next`.
+    /// The chain left the pending plan via an accepted step: emit the sampled
+    /// positions occupied by that plan, then buffer `next`.
     fn push_step<W: Write>(
         &mut self,
         writer: &mut BenStreamWriter<W>,
+        step: u64,
         next_assignment: Vec<u16>,
         self_loops: u64,
     ) -> Result<()> {
-        let count = self_loops + 1;
+        debug_assert_eq!(step, self.final_step + self_loops + 1);
+        let count = sampled_step_count(
+            self.pending_step,
+            step.saturating_sub(1),
+            self.sample_interval,
+        );
         let pending_assignment = std::mem::replace(&mut self.pending_assignment, next_assignment);
-        self.write_counted(writer, pending_assignment, count)
+        if count > 0 {
+            self.write_counted(writer, pending_assignment, count)?;
+        }
+        self.pending_step = step;
+        self.final_step = step;
+        Ok(())
     }
 
-    /// Accumulate trailing self-loops sampled at the final plan.
-    fn add_self_loops(&mut self, count: u64) {
-        self.trailing_self_loops += count;
+    /// Extend the final plan through a terminal batch of self-loops.
+    fn add_self_loops(&mut self, step: u64, count: u64) {
+        debug_assert_eq!(step, self.final_step + count);
+        self.final_step = step;
     }
 
-    /// Emit the final pending plan with count `trailing_self_loops + 1` (the
-    /// trailing rejections plus the arriving step counted at this plan; mirrors
-    /// the `+ 1` in `push_step`).
+    /// Emit the selected positions occupied by the final pending plan.
     fn flush_final<W: Write>(&mut self, writer: &mut BenStreamWriter<W>) -> Result<()> {
-        let count = self.trailing_self_loops + 1;
+        let count = sampled_step_count(self.pending_step, self.final_step, self.sample_interval);
         let pending_assignment = std::mem::take(&mut self.pending_assignment);
-        self.write_counted(writer, pending_assignment, count)
+        if count > 0 {
+            self.write_counted(writer, pending_assignment, count)?;
+        }
+        Ok(())
     }
 
     /// Write `assignment` with repeat `count`, splitting counts above
@@ -242,6 +284,14 @@ pub struct PcompressWriter {
     writer: BufWriter<Box<dyn Write + Send>>,
     /// Diff buffer (reused across steps).
     diff: Diff,
+    /// Current chain assignment before the next accepted proposal.
+    previous_assignment: Vec<u32>,
+    /// Last assignment emitted into the pcompress stream.
+    emitted_assignment: Vec<u32>,
+    /// Last chain step covered by a callback.
+    last_step: u64,
+    /// Emit only chain positions divisible by this value.
+    sample_interval: u64,
 }
 
 /// Writes statistics in JSONL (JSON Lines) format.
@@ -275,7 +325,14 @@ impl AssignmentsOnlyWriter {
             canonicalize: canonicalize,
             previous_assignment: Vec::new(),
             last_step: 0,
+            sample_interval: 1,
         }
+    }
+
+    pub fn with_sample_interval(mut self, sample_interval: u64) -> Self {
+        assert!(sample_interval > 0, "sample interval must be positive");
+        self.sample_interval = sample_interval;
+        self
     }
 
     /// Canonicalizes the assignment vector.
@@ -320,8 +377,15 @@ impl CanonicalWriter {
         CanonicalWriter {
             previous_assignment: Vec::new(),
             last_step: 0,
+            sample_interval: 1,
             output: output,
         }
+    }
+
+    pub fn with_sample_interval(mut self, sample_interval: u64) -> Self {
+        assert!(sample_interval > 0, "sample interval must be positive");
+        self.sample_interval = sample_interval;
+        self
     }
 
     fn write_sample(&mut self, chain_step: u64, assignment: &[u32]) -> Result<()> {
@@ -346,6 +410,11 @@ impl BenWriter {
             frames: TwoDeltaFrameBuffer::new(),
         }
     }
+
+    pub fn with_sample_interval(mut self, sample_interval: u64) -> Self {
+        self.frames.set_sample_interval(sample_interval);
+        self
+    }
 }
 
 impl BendlBenStreamWriter {
@@ -363,6 +432,11 @@ impl BendlBenStreamWriter {
             stream: None,
             frames: TwoDeltaFrameBuffer::new(),
         }
+    }
+
+    pub fn with_sample_interval(mut self, sample_interval: u64) -> Self {
+        self.frames.set_sample_interval(sample_interval);
+        self
     }
 }
 
@@ -643,11 +717,17 @@ impl StatsWriter for AssignmentsOnlyWriter {
     ) -> Result<()> {
         debug_assert_eq!(step, self.last_step + counts.sum() as u64 + 1);
         let previous_assignment = self.previous_assignment.clone();
-        for self_loop_step in self.last_step + 1..step {
+        for self_loop_step in sampled_steps(
+            self.last_step + 1,
+            step.saturating_sub(1),
+            self.sample_interval,
+        ) {
             self.write_assignment(self_loop_step, &previous_assignment)?;
         }
         let assignment = self.assignment(partition);
-        self.write_assignment(step, &assignment)?;
+        if step.is_multiple_of(self.sample_interval) {
+            self.write_assignment(step, &assignment)?;
+        }
         self.previous_assignment = assignment;
         self.last_step = step;
         Ok(())
@@ -662,7 +742,7 @@ impl StatsWriter for AssignmentsOnlyWriter {
     ) -> Result<()> {
         debug_assert_eq!(step, self.last_step + counts.sum() as u64);
         let previous_assignment = self.previous_assignment.clone();
-        for self_loop_step in self.last_step + 1..=step {
+        for self_loop_step in sampled_steps(self.last_step + 1, step, self.sample_interval) {
             self.write_assignment(self_loop_step, &previous_assignment)?;
         }
         self.last_step = step;
@@ -693,12 +773,18 @@ impl StatsWriter for CanonicalWriter {
     ) -> Result<()> {
         debug_assert_eq!(step, self.last_step + counts.sum() as u64 + 1);
         let previous_assignment = self.previous_assignment.clone();
-        for self_loop_step in self.last_step + 1..step {
+        for self_loop_step in sampled_steps(
+            self.last_step + 1,
+            step.saturating_sub(1),
+            self.sample_interval,
+        ) {
             self.write_sample(self_loop_step, &previous_assignment)?;
         }
         self.previous_assignment = partition.assignments.clone();
         let assignment = self.previous_assignment.clone();
-        self.write_sample(step, &assignment)?;
+        if step.is_multiple_of(self.sample_interval) {
+            self.write_sample(step, &assignment)?;
+        }
         self.last_step = step;
         Ok(())
     }
@@ -712,7 +798,7 @@ impl StatsWriter for CanonicalWriter {
     ) -> Result<()> {
         debug_assert_eq!(step, self.last_step + counts.sum() as u64);
         let previous_assignment = self.previous_assignment.clone();
-        for self_loop_step in self.last_step + 1..=step {
+        for self_loop_step in sampled_steps(self.last_step + 1, step, self.sample_interval) {
             self.write_sample(self_loop_step, &previous_assignment)?;
         }
         self.last_step = step;
@@ -739,7 +825,7 @@ impl StatsWriter for BenWriter {
 
     fn step(
         &mut self,
-        _step: u64,
+        step: u64,
         _graph: &Graph,
         partition: &Partition,
         _proposal: &RecomProposal,
@@ -748,12 +834,12 @@ impl StatsWriter for BenWriter {
         let next_assignment = partition.assignments.iter().map(|&x| x as u16).collect();
         let stream = self.stream.as_mut().expect("BenWriter stepped before init");
         self.frames
-            .push_step(stream, next_assignment, counts.sum() as u64)
+            .push_step(stream, step, next_assignment, counts.sum() as u64)
     }
 
     fn self_loop(
         &mut self,
-        _step: u64,
+        step: u64,
         _graph: &Graph,
         _partition: &Partition,
         counts: &SelfLoopCounts,
@@ -761,7 +847,7 @@ impl StatsWriter for BenWriter {
         // Trailing rejections occur at the final plan and are folded into its
         // segment count by `close`. The runner emits one `self_loop` call per
         // pending batch; accumulate in case there are several.
-        self.frames.add_self_loops(counts.sum() as u64);
+        self.frames.add_self_loops(step, counts.sum() as u64);
         Ok(())
     }
 
@@ -807,7 +893,7 @@ impl StatsWriter for BendlBenStreamWriter {
 
     fn step(
         &mut self,
-        _step: u64,
+        step: u64,
         _graph: &Graph,
         partition: &Partition,
         _proposal: &RecomProposal,
@@ -819,17 +905,17 @@ impl StatsWriter for BendlBenStreamWriter {
             .as_mut()
             .expect("BendlBenStreamWriter stepped before init");
         self.frames
-            .push_step(stream, next_assignment, counts.sum() as u64)
+            .push_step(stream, step, next_assignment, counts.sum() as u64)
     }
 
     fn self_loop(
         &mut self,
-        _step: u64,
+        step: u64,
         _graph: &Graph,
         _partition: &Partition,
         counts: &SelfLoopCounts,
     ) -> Result<()> {
-        self.frames.add_self_loops(counts.sum() as u64);
+        self.frames.add_self_loops(step, counts.sum() as u64);
         Ok(())
     }
 
@@ -860,62 +946,109 @@ impl PcompressWriter {
         PcompressWriter {
             writer: BufWriter::new(output),
             diff: Diff::new(),
+            previous_assignment: Vec::new(),
+            emitted_assignment: Vec::new(),
+            last_step: 0,
+            sample_interval: 1,
         }
+    }
+
+    pub fn with_sample_interval(mut self, sample_interval: u64) -> Self {
+        assert!(sample_interval > 0, "sample interval must be positive");
+        self.sample_interval = sample_interval;
+        self
+    }
+
+    fn write_assignment(&mut self, assignment: &[u32]) {
+        self.diff.reset();
+        if self.emitted_assignment.is_empty() {
+            for (node, &dist) in assignment.iter().enumerate() {
+                self.diff.add(dist as usize, node);
+            }
+        } else {
+            for (node, (&previous, &next)) in
+                self.emitted_assignment.iter().zip(assignment).enumerate()
+            {
+                if previous != next {
+                    self.diff.add(next as usize, node);
+                }
+            }
+        }
+        export_diff(&mut self.writer, &self.diff);
+        self.emitted_assignment.clear();
+        self.emitted_assignment.extend_from_slice(assignment);
     }
 }
 
 impl StatsWriter for PcompressWriter {
     fn init(&mut self, _graph: &Graph, partition: &Partition) -> Result<()> {
-        for (node, &dist) in partition.assignments.iter().enumerate() {
-            self.diff.add(dist as usize, node);
-        }
-        export_diff(&mut self.writer, &self.diff);
+        self.previous_assignment = partition.assignments.clone();
+        let assignment = self.previous_assignment.clone();
+        self.write_assignment(&assignment);
+        self.last_step = 0;
         Ok(())
     }
 
     fn step(
         &mut self,
-        _step: u64,
+        step: u64,
         _graph: &Graph,
-        _partition: &Partition,
+        partition: &Partition,
         proposal: &RecomProposal,
         counts: &SelfLoopCounts,
     ) -> Result<()> {
-        // Write out self-loops first. The counts here
-        // are the number of self-loops since the last
-        // accepted proposal (i.e. the number of times the
-        // last proposal was repeated before acceptance).
-        self.diff.reset();
-        for _ in 0..counts.sum() {
+        debug_assert_eq!(step, self.last_step + counts.sum() as u64 + 1);
+        if self.sample_interval == 1 {
+            self.diff.reset();
+            for _ in 0..counts.sum() {
+                export_diff(&mut self.writer, &self.diff);
+            }
+
+            self.diff.reset();
+            for &node in &proposal.a_nodes {
+                self.diff.add(proposal.a_label, node);
+            }
+            for &node in &proposal.b_nodes {
+                self.diff.add(proposal.b_label, node);
+            }
             export_diff(&mut self.writer, &self.diff);
+
+            self.previous_assignment.clone_from(&partition.assignments);
+            self.emitted_assignment.clone_from(&partition.assignments);
+            self.last_step = step;
+            return Ok(());
         }
 
-        // Write out the actual delta.
-        self.diff.reset();
-        for &node in proposal.a_nodes.iter() {
-            self.diff.add(proposal.a_label, node);
+        let previous_assignment = self.previous_assignment.clone();
+        for _ in sampled_steps(
+            self.last_step + 1,
+            step.saturating_sub(1),
+            self.sample_interval,
+        ) {
+            self.write_assignment(&previous_assignment);
         }
-        for &node in proposal.b_nodes.iter() {
-            self.diff.add(proposal.b_label, node);
+        self.previous_assignment = partition.assignments.clone();
+        if step.is_multiple_of(self.sample_interval) {
+            let assignment = self.previous_assignment.clone();
+            self.write_assignment(&assignment);
         }
-        export_diff(&mut self.writer, &self.diff);
-
+        self.last_step = step;
         Ok(())
     }
 
     fn self_loop(
         &mut self,
-        _step: u64,
+        step: u64,
         _graph: &Graph,
         _partition: &Partition,
         counts: &SelfLoopCounts,
     ) -> Result<()> {
-        // Self-loops after the last accepted proposal: repeat the final plan
-        // as empty diffs, mirroring the pre-acceptance encoding in `step`.
-        self.diff.reset();
-        for _ in 0..counts.sum() {
-            export_diff(&mut self.writer, &self.diff);
+        debug_assert_eq!(step, self.last_step + counts.sum() as u64);
+        let previous_assignment = self.previous_assignment.clone();
+        for _ in sampled_steps(self.last_step + 1, step, self.sample_interval) {
+            self.write_assignment(&previous_assignment);
         }
+        self.last_step = step;
         Ok(())
     }
 
