@@ -15,6 +15,6 @@ cargo run --release --bin rustrecom -- \
     --rng-seed 20260409 \
     --n-threads 4 \
     --batch-size 8 \
-    --variant district-pairs-rmst \
+    --variant district-pairs-mst \
     --writer canonical \
     --show-progress
