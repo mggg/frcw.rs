@@ -4,7 +4,7 @@ use crate::graph::Graph;
 use crate::partition::Partition;
 use crate::spanning_tree::{RMSTSampler, RegionAwareSampler, SpanningTreeSampler, USTSampler};
 use rand::rngs::SmallRng;
-use rand::Rng;
+use rand::RngExt;
 
 /// ReCom batch size autotuning.
 //mod autotune;

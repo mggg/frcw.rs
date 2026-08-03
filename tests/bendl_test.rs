@@ -5,6 +5,7 @@
 //! the test environment. One provenance test does invoke the built `rustrecom`
 //! binary (via `CARGO_BIN_EXE_rustrecom`) to exercise the real metadata wiring.
 
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::PathBuf;
@@ -46,9 +47,12 @@ fn temp_path(tag: &str) -> PathBuf {
 }
 
 fn sha3_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha3_256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    let digest = Sha3_256::digest(bytes);
+    let mut output = String::with_capacity(2 * digest.len());
+    for byte in digest {
+        write!(&mut output, "{byte:02x}").unwrap();
+    }
+    output
 }
 
 /// Standard (non-reversible) params that accept proposals on the 6x6 grid.

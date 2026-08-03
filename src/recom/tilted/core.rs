@@ -47,7 +47,7 @@ pub const REVERSIBLE_UNSUPPORTED: &str =
     "Reversible ReCom is not supported by the tilted run optimizer.";
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 /// Decides whether to accept a proposal that does not improve the current score.
 ///

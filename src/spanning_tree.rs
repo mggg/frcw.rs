@@ -2,7 +2,7 @@
 use crate::buffers::SpanningTreeBuffer;
 use crate::graph::{Edge, Graph};
 use rand::rngs::SmallRng;
-use rand::Rng;
+use rand::RngExt;
 use serde::Serialize;
 use std::cmp::{max, min};
 use std::fmt;
@@ -396,7 +396,9 @@ mod rmst {
             //     on the edge index order in `weights_with_indices`.
             let n_edges = graph.edges.len();
             self.weights.resize(n_edges, 0.0);
-            rng.fill(&mut self.weights[..]);
+            for weight in &mut self.weights {
+                *weight = rng.random();
+            }
             for (region_col, region_weight) in self.region_weights.iter() {
                 let col = &attr_source.attr[region_col];
                 for (idx, edge) in graph.edges.iter().enumerate() {

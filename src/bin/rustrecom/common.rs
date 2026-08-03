@@ -22,18 +22,25 @@ use rustrecom::stats::{
 };
 use serde_json::{json, Value};
 use sha3::{Digest, Sha3_256};
+use std::fmt::Write as _;
 use std::fs::OpenOptions;
-use std::io::BufWriter;
+use std::io::{BufWriter, Read};
 use std::path::{Path, PathBuf};
 use std::{fs, io};
 
 pub const OUTPUT_BUFFER_CAPACITY: usize = 128 * 1024;
 
+fn hex(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(2 * bytes.len());
+    for byte in bytes {
+        write!(&mut output, "{byte:02x}").unwrap();
+    }
+    output
+}
+
 /// SHA3-256 hex digest of `bytes`, matching the file-hash provenance format.
 pub fn sha3_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha3_256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    hex(&Sha3_256::digest(bytes))
 }
 
 pub fn assert_can_write_output(path: &Path, overwrite_output: bool) {
@@ -256,12 +263,19 @@ pub fn load_graph_with_provenance(
         });
         let mut graph_file = fs::File::open(graph_json).unwrap();
         let mut graph_hasher = Sha3_256::new();
-        io::copy(&mut graph_file, &mut graph_hasher).unwrap();
+        let mut buffer = [0; 64 * 1024];
+        loop {
+            let count = graph_file.read(&mut buffer).unwrap();
+            if count == 0 {
+                break;
+            }
+            graph_hasher.update(&buffer[..count]);
+        }
         LoadedGraph {
             graph,
             partition,
             embed_bytes: None,
-            source_graph_sha3: format!("{:x}", graph_hasher.finalize()),
+            source_graph_sha3: hex(&graph_hasher.finalize()),
             embedded_graph_sha3: None,
         }
     }

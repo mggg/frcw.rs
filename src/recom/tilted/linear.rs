@@ -4,7 +4,7 @@
 //! `1 - beta * loss`, clamped at zero once the scaled loss is at least `1.0`.
 
 use rand::rngs::SmallRng;
-use rand::Rng;
+use rand::RngExt;
 
 use super::core::AcceptanceRule;
 

@@ -45,7 +45,7 @@ use crossbeam::scope;
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 /// Capacity of the bounded channels feeding the stats and score writer
 /// threads. Matches the tilted runner.

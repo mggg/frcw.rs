@@ -21,7 +21,7 @@ use crossbeam::scope;
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 /// Determines how many proposals the stats thread can lag behind by
 /// (compared to the head of the chain).

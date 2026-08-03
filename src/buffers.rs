@@ -191,7 +191,7 @@ mod split {
 /// Buffer for random bytes.
 mod random_range {
     use rand::rngs::SmallRng;
-    use rand::Rng;
+    use rand::RngExt;
     use std::num::Wrapping;
 
     /// Size of the buffer of random values.

@@ -9,7 +9,7 @@
 //! that consumes this rule lives in [`super::core`].
 
 use rand::rngs::SmallRng;
-use rand::Rng;
+use rand::RngExt;
 
 use super::core::AcceptanceRule;
 
