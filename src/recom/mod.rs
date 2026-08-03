@@ -8,6 +8,7 @@ use rand::Rng;
 
 /// ReCom batch size autotuning.
 //mod autotune;
+mod mst_diagnostics;
 /// ReCom runners.
 pub mod run;
 /// ReCom-based short-bursts optimizer.

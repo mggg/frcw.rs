@@ -3,7 +3,57 @@ use crate::buffers::SpanningTreeBuffer;
 use crate::graph::{Edge, Graph};
 use rand::rngs::SmallRng;
 use rand::Rng;
+use serde::Serialize;
 use std::cmp::{max, min};
+use std::fmt;
+
+/// Failure to construct a spanning tree from the graph's adjacency and edge data.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SpanningTreeError {
+    Disconnected {
+        node_count: usize,
+        graph_edge_count: usize,
+        expected_tree_edges: usize,
+        actual_tree_edges: usize,
+    },
+    MissingEdge {
+        source: usize,
+        target: usize,
+        edge_list: &'static str,
+    },
+}
+
+impl fmt::Display for SpanningTreeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SpanningTreeError::Disconnected {
+                node_count,
+                graph_edge_count,
+                expected_tree_edges,
+                actual_tree_edges,
+            } => write!(
+                f,
+                "Cannot construct a spanning tree: the induced graph is disconnected \
+                 ({} nodes, {} edges; found {} of {} required tree edges). Check graph \
+                 adjacency data and node IDs.",
+                node_count, graph_edge_count, actual_tree_edges, expected_tree_edges
+            ),
+            SpanningTreeError::MissingEdge {
+                source,
+                target,
+                edge_list,
+            } => write!(
+                f,
+                "Cannot construct a spanning tree: adjacency edge ({}, {}) is missing from the {} \
+                 edge list. Check graph adjacency data and node IDs.",
+                source, target, edge_list
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SpanningTreeError {}
 
 pub trait SpanningTreeSampler {
     /// Samples a random tree of `graph` using `rng`; inserts the tree into `buf`.
@@ -12,7 +62,7 @@ pub trait SpanningTreeSampler {
         graph: &Graph,
         buf: &mut SpanningTreeBuffer,
         rng: &mut SmallRng,
-    );
+    ) -> Result<(), SpanningTreeError>;
 
     /// Variant that lets region-aware samplers read node attributes from the
     /// parent graph without requiring them to be copied onto `graph`. The
@@ -28,8 +78,8 @@ pub trait SpanningTreeSampler {
         _raw_nodes: &[usize],
         buf: &mut SpanningTreeBuffer,
         rng: &mut SmallRng,
-    ) {
-        self.random_spanning_tree(graph, buf, rng);
+    ) -> Result<(), SpanningTreeError> {
+        self.random_spanning_tree(graph, buf, rng)
     }
 }
 pub use crate::spanning_tree::rmst::{RMSTSampler, RegionAwareSampler};
@@ -90,7 +140,7 @@ mod ust {
 
     impl SpanningTreeSampler for USTSampler {
         /// Draws a random spanning tree of a graph from the uniform distribution.
-        /// Returns nothing; The MST buffer `buf` is updated in place.
+        /// The MST buffer `buf` is updated in place.
         ///
         /// We use Wilson's algorithm [1] (which is, in essence, a self-avoiding random
         /// walk) to generate the tree.
@@ -112,10 +162,18 @@ mod ust {
             graph: &Graph,
             buf: &mut SpanningTreeBuffer,
             rng: &mut SmallRng,
-        ) {
+        ) -> Result<(), SpanningTreeError> {
             buf.clear();
             self.ust_buf.clear();
             let n = graph.pops.len();
+            if n == 0 {
+                return Err(SpanningTreeError::Disconnected {
+                    node_count: 0,
+                    graph_edge_count: graph.edges.len(),
+                    expected_tree_edges: 0,
+                    actual_tree_edges: 0,
+                });
+            }
             let root = rng.random_range(0..n);
             self.ust_buf.in_tree[root] = true;
             for i in 0..n {
@@ -138,22 +196,39 @@ mod ust {
                 if prev >= 0 {
                     let a = min(curr, prev as usize);
                     let b = max(curr, prev as usize);
-                    let mut edge_idx = graph.edges_start[a];
-                    while graph.edges[edge_idx].0 == a {
-                        if graph.edges[edge_idx].1 == b {
-                            self.ust_buf.edges.push(edge_idx);
-                            break;
-                        }
-                        edge_idx += 1;
-                    }
+                    let start = graph
+                        .edges_start
+                        .get(a)
+                        .copied()
+                        .unwrap_or(graph.edges.len());
+                    let end = graph
+                        .edges_start
+                        .get(a + 1)
+                        .copied()
+                        .unwrap_or(graph.edges.len());
+                    let Some(offset) = graph
+                        .edges
+                        .get(start..end)
+                        .unwrap_or(&[])
+                        .iter()
+                        .position(|edge| edge.1 == b)
+                    else {
+                        return Err(SpanningTreeError::MissingEdge {
+                            source: a,
+                            target: b,
+                            edge_list: "induced graph",
+                        });
+                    };
+                    self.ust_buf.edges.push(start + offset);
                 }
             }
             if self.ust_buf.edges.len() != n - 1 {
-                panic!(
-                    "expected to have {} edges in MST but got {}",
-                    n - 1,
-                    self.ust_buf.edges.len()
-                );
+                return Err(SpanningTreeError::Disconnected {
+                    node_count: n,
+                    graph_edge_count: graph.edges.len(),
+                    expected_tree_edges: n - 1,
+                    actual_tree_edges: self.ust_buf.edges.len(),
+                });
             }
 
             for &edge in self.ust_buf.edges.iter() {
@@ -161,6 +236,7 @@ mod ust {
                 buf.st[src].push(dst);
                 buf.st[dst].push(src);
             }
+            Ok(())
         }
     }
 }
@@ -233,9 +309,18 @@ mod rmst {
     fn greedy_spanning_tree(
         graph: &Graph,
         buf: &mut SpanningTreeBuffer,
-        edges_by_weight: &Vec<Edge>,
-    ) {
+        edges_by_weight: &[Edge],
+    ) -> Result<(), SpanningTreeError> {
         buf.clear();
+
+        if graph.pops.is_empty() {
+            return Err(SpanningTreeError::Disconnected {
+                node_count: 0,
+                graph_edge_count: graph.edges.len(),
+                expected_tree_edges: 0,
+                actual_tree_edges: 0,
+            });
+        }
 
         // Initialize a union-find data structure to keep track of connected
         // components of the graph.
@@ -257,17 +342,20 @@ mod rmst {
             }
         }
         if n_unions != n_edges {
-            panic!(
-                "expected to have {} edges in MST but got {}",
-                n_edges, n_unions
-            );
+            return Err(SpanningTreeError::Disconnected {
+                node_count: graph.pops.len(),
+                graph_edge_count: graph.edges.len(),
+                expected_tree_edges: n_edges,
+                actual_tree_edges: n_unions,
+            });
         }
+        Ok(())
     }
 
     impl SpanningTreeSampler for RMSTSampler {
         /// Draws a random spanning tree of a graph by sampling random edge weights
         /// and finding the minimum spanning tree (using Kruskal's algorithm).
-        /// Returns nothing; The MST buffer `buf` is updated in place.
+        /// The MST buffer `buf` is updated in place.
         ///
         /// # Arguments
         /// * `graph` - The graph to form a spanning tree from.
@@ -278,10 +366,10 @@ mod rmst {
             graph: &Graph,
             buf: &mut SpanningTreeBuffer,
             rng: &mut SmallRng,
-        ) {
+        ) -> Result<(), SpanningTreeError> {
             self.edges_by_weight.clone_from(&graph.edges);
             self.edges_by_weight.shuffle(rng);
-            greedy_spanning_tree(graph, buf, &self.edges_by_weight);
+            greedy_spanning_tree(graph, buf, &self.edges_by_weight)
         }
     }
 
@@ -297,7 +385,7 @@ mod rmst {
             attr_indices: &[usize],
             buf: &mut SpanningTreeBuffer,
             rng: &mut SmallRng,
-        ) {
+        ) -> Result<(), SpanningTreeError> {
             // An allocation-free scheme for weight sampling: maintain three
             // separate buffers.
             //   * Efficiently generate raw weights by edge index
@@ -332,14 +420,30 @@ mod rmst {
                 for (idx, edge) in graph.edges.iter().enumerate() {
                     let a = min(attr_indices[edge.0], attr_indices[edge.1]);
                     let b = max(attr_indices[edge.0], attr_indices[edge.1]);
-                    let mut e = attr_source.edges_start[a];
-                    while attr_source.edges[e].0 == a {
-                        if attr_source.edges[e].1 == b {
-                            self.weights[idx] += vals[e];
-                            break;
-                        }
-                        e += 1;
-                    }
+                    let start = attr_source
+                        .edges_start
+                        .get(a)
+                        .copied()
+                        .unwrap_or(attr_source.edges.len());
+                    let end = attr_source
+                        .edges_start
+                        .get(a + 1)
+                        .copied()
+                        .unwrap_or(attr_source.edges.len());
+                    let Some(offset) = attr_source
+                        .edges
+                        .get(start..end)
+                        .unwrap_or(&[])
+                        .iter()
+                        .position(|parent_edge| parent_edge.1 == b)
+                    else {
+                        return Err(SpanningTreeError::MissingEdge {
+                            source: a,
+                            target: b,
+                            edge_list: "parent graph",
+                        });
+                    };
+                    self.weights[idx] += vals[start + offset];
                 }
             }
 
@@ -357,7 +461,7 @@ mod rmst {
                 self.edges_by_weight.push(graph.edges[*edge_idx]);
             }
 
-            greedy_spanning_tree(graph, buf, &self.edges_by_weight);
+            greedy_spanning_tree(graph, buf, &self.edges_by_weight)
         }
     }
 
@@ -369,7 +473,7 @@ mod rmst {
         /// are downweighted by the unit's weight, such that (assuming positive weights)
         /// the minimum spanning tree is more likely to contain edges _between_ units.
         ///
-        /// Returns nothing; The MST buffer `buf` is updated in place.
+        /// The MST buffer `buf` is updated in place.
         ///
         /// # Arguments
         /// * `graph` - The graph to form a spanning tree from.
@@ -380,9 +484,9 @@ mod rmst {
             graph: &Graph,
             buf: &mut SpanningTreeBuffer,
             rng: &mut SmallRng,
-        ) {
+        ) -> Result<(), SpanningTreeError> {
             let identity: Vec<usize> = (0..graph.pops.len()).collect();
-            self.sample_with_attr_source(graph, graph, &identity, buf, rng);
+            self.sample_with_attr_source(graph, graph, &identity, buf, rng)
         }
 
         fn random_spanning_tree_with_parent(
@@ -392,8 +496,8 @@ mod rmst {
             raw_nodes: &[usize],
             buf: &mut SpanningTreeBuffer,
             rng: &mut SmallRng,
-        ) {
-            self.sample_with_attr_source(graph, parent, raw_nodes, buf, rng);
+        ) -> Result<(), SpanningTreeError> {
+            self.sample_with_attr_source(graph, parent, raw_nodes, buf, rng)
         }
     }
 }
@@ -428,6 +532,42 @@ mod tests {
     }
 
     #[test]
+    fn disconnected_rmst_returns_contextual_error() {
+        let graph = Graph {
+            edges: vec![Edge(0, 1)],
+            pops: vec![1, 1, 1],
+            neighbors: vec![vec![1], vec![0, 2], vec![1]],
+            edges_start: vec![0, 1, 1],
+            total_pop: 3,
+            attr: HashMap::new(),
+            edge_attr: HashMap::new(),
+            int_attr: HashMap::new(),
+            float_attr: HashMap::new(),
+        };
+        let mut sampler = RMSTSampler::new(3);
+        let mut buf = SpanningTreeBuffer::new(3);
+        let mut rng = SmallRng::seed_from_u64(1);
+
+        let error = sampler
+            .random_spanning_tree(&graph, &mut buf, &mut rng)
+            .unwrap_err();
+        assert_eq!(
+            error,
+            SpanningTreeError::Disconnected {
+                node_count: 3,
+                graph_edge_count: 1,
+                expected_tree_edges: 2,
+                actual_tree_edges: 1,
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "Cannot construct a spanning tree: the induced graph is disconnected (3 nodes, 1 \
+             edges; found 1 of 2 required tree edges). Check graph adjacency data and node IDs."
+        );
+    }
+
+    #[test]
     fn edge_weight_key_forces_high_weight_edge_out_of_tree() {
         // Edge (1,2) carries an overwhelming weight, so the minimum spanning
         // tree must never include it (1 and 2 connect via node 0 instead).
@@ -437,7 +577,9 @@ mod tests {
         let mut buf = SpanningTreeBuffer::new(graph.pops.len());
         for seed in 0..64u64 {
             let mut rng = SmallRng::seed_from_u64(seed);
-            sampler.random_spanning_tree(&graph, &mut buf, &mut rng);
+            sampler
+                .random_spanning_tree(&graph, &mut buf, &mut rng)
+                .unwrap();
             assert!(
                 !tree_has_edge(&buf, 1, 2),
                 "edge (1,2) should be excluded (seed {})",
@@ -459,7 +601,9 @@ mod tests {
         let mut seen = false;
         for seed in 0..64u64 {
             let mut rng = SmallRng::seed_from_u64(seed);
-            sampler.random_spanning_tree(&graph, &mut buf, &mut rng);
+            sampler
+                .random_spanning_tree(&graph, &mut buf, &mut rng)
+                .unwrap();
             if tree_has_edge(&buf, 1, 2) {
                 seen = true;
                 break;
@@ -497,9 +641,11 @@ mod tests {
         let mut buf = SpanningTreeBuffer::new(3);
         for seed in 0..64u64 {
             let mut rng = SmallRng::seed_from_u64(seed);
-            sampler.random_spanning_tree_with_parent(
-                &subgraph, &parent, &raw_nodes, &mut buf, &mut rng,
-            );
+            sampler
+                .random_spanning_tree_with_parent(
+                    &subgraph, &parent, &raw_nodes, &mut buf, &mut rng,
+                )
+                .unwrap();
             assert!(
                 !tree_has_edge(&buf, 1, 2),
                 "subgraph edge (1,2) -> parent (2,3) should be excluded (seed {})",

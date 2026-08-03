@@ -47,7 +47,7 @@ pub(super) struct ScoredProposal {
 /// disconnected merges and never report self-loops, since short bursts has
 /// no within-chain rejection.
 pub(super) struct BurstResult {
-    pub(super) proposal: ScoredProposal,
+    pub(super) proposal: Result<ScoredProposal, String>,
 }
 
 /// A chain-statistics write packet sent from the main thread to the stats
@@ -88,11 +88,10 @@ pub(super) fn broadcast_diff(job_sends: &[Sender<BurstJobPacket>], diff: &BurstD
 
 /// Stops a short-bursts worker thread.
 pub(super) fn terminate_burst_worker(send: &Sender<BurstJobPacket>) {
-    send.send(BurstJobPacket {
+    let _ = send.send(BurstJobPacket {
         diff: BurstDiff::None,
         terminate: true,
-    })
-    .unwrap();
+    });
 }
 
 impl Clone for BurstDiff {

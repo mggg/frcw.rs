@@ -30,6 +30,7 @@ use super::writers::{start_tilted_score_writer, start_tilted_stats_writer};
 use crate::buffers::graph_connected_buffered;
 use crate::graph::Graph;
 use crate::partition::Partition;
+use crate::recom::mst_diagnostics::{debug_directory, failure_message};
 use crate::spanning_tree::SpanningTreeSampler;
 use crate::stats::{ScoresWriter, SelfLoopCounts, SelfLoopReason, StatsWriter};
 use crossbeam::scope;
@@ -377,7 +378,7 @@ fn run_tilted_main_loop<B>(
     params: &RecomParams,
     effective_steps: u64,
     n_threads: usize,
-    result_recv: &Receiver<TiltedResultPacket>,
+    result_recv: &Receiver<Result<TiltedResultPacket, String>>,
     job_sends: &[Sender<TiltedJobPacket>],
     rng: &mut SmallRng,
     maximize: bool,
@@ -385,7 +386,8 @@ fn run_tilted_main_loop<B>(
     stats_send: Option<&Sender<TiltedStatsPacket>>,
     score_send: Option<&Sender<TiltedScorePacket>>,
     progress_bar: Option<&ProgressBar>,
-) where
+) -> Result<(), String>
+where
     B: ScoringBackend,
 {
     if effective_steps > 0 {
@@ -395,7 +397,7 @@ fn run_tilted_main_loop<B>(
     let progress_chunk = (params.num_steps / 1000).clamp(1, 1000);
     let mut last_drawn = state.step;
     while state.step < effective_steps {
-        let (loops, proposals) = collect_tilted_results(result_recv, n_threads);
+        let (loops, proposals) = collect_tilted_results(result_recv, n_threads)?;
         interleave_tilted_round(
             graph,
             backend,
@@ -420,6 +422,7 @@ fn run_tilted_main_loop<B>(
             }
         }
     }
+    Ok(())
 }
 
 /// Draws one round of tilted output for a backend-aware worker.
@@ -435,7 +438,11 @@ fn draw_tilted_result<B, R>(
     rule: R,
     maximize: bool,
     rng: &mut SmallRng,
-) -> TiltedResultPacket
+    debug_directory: Option<&std::path::Path>,
+    previous_assignment: Option<&[u32]>,
+    worker_index: usize,
+    rng_seed: u64,
+) -> Result<TiltedResultPacket, String>
 where
     B: ScoringBackend,
     R: AcceptanceRule,
@@ -451,13 +458,27 @@ where
             continue;
         }
 
-        st_sampler.random_spanning_tree_with_parent(
+        if let Err(error) = st_sampler.random_spanning_tree_with_parent(
             &buffers.subgraph.graph,
             graph,
             &buffers.subgraph.raw_nodes,
             &mut buffers.spanning_tree,
             rng,
-        );
+        ) {
+            return Err(failure_message(
+                debug_directory,
+                "tilted",
+                worker_index,
+                rng_seed,
+                params.variant,
+                &error,
+                previous_assignment,
+                partition,
+                dist_a,
+                dist_b,
+                &buffers.subgraph,
+            ));
+        }
         let split = random_split(
             &buffers.subgraph.graph,
             graph,
@@ -488,20 +509,20 @@ where
             new_score <= current_score
         };
         if is_improvement || rule.accept_worse(current_score, new_score, maximize, rng) {
-            return TiltedResultPacket {
+            return Ok(TiltedResultPacket {
                 rejections: 0,
                 proposals: vec![ScoredProposal {
                     id: rng.random::<u64>(),
                     proposal: buffers.proposal.clone(),
                     score: new_score,
                 }],
-            };
+            });
         }
 
-        return TiltedResultPacket {
+        return Ok(TiltedResultPacket {
             rejections: 1,
             proposals: Vec::new(),
-        };
+        });
     }
 }
 
@@ -514,10 +535,11 @@ fn start_tilted_worker<B, R>(
     backend: B,
     rule: R,
     maximize: bool,
+    worker_index: usize,
     rng_seed: u64,
     buf_size: usize,
     job_recv: Receiver<TiltedJobPacket>,
-    result_send: Sender<TiltedResultPacket>,
+    result_send: Sender<Result<TiltedResultPacket, String>>,
 ) where
     B: ScoringBackend,
     R: AcceptanceRule,
@@ -531,9 +553,15 @@ fn start_tilted_worker<B, R>(
         params.balance_ub,
     );
     let mut st_sampler = make_sampler(&params, buf_size, &mut rng);
+    let debug_directory = debug_directory();
 
     let mut next: TiltedJobPacket = job_recv.recv().unwrap();
     while !next.terminate {
+        let previous_assignment = if debug_directory.is_some() && next.diff.is_some() {
+            Some(partition.assignments.clone())
+        } else {
+            None
+        };
         if let Some(diff) = &next.diff {
             backend.apply_accepted(graph, &mut partition, &mut state, diff);
         }
@@ -550,9 +578,17 @@ fn start_tilted_worker<B, R>(
             rule,
             maximize,
             &mut rng,
+            debug_directory.as_deref(),
+            previous_assignment.as_deref(),
+            worker_index,
+            rng_seed,
         );
 
-        result_send.send(result).unwrap();
+        let failed = result.is_err();
+        let _ = result_send.send(result);
+        if failed {
+            return;
+        }
         next = job_recv.recv().unwrap();
     }
 }
@@ -618,8 +654,10 @@ where
         job_sends.push(s);
         job_recvs.push(r);
     }
-    let (result_send, result_recv): (Sender<TiltedResultPacket>, Receiver<TiltedResultPacket>) =
-        unbounded();
+    let (result_send, result_recv): (
+        Sender<Result<TiltedResultPacket, String>>,
+        Receiver<Result<TiltedResultPacket, String>>,
+    ) = unbounded();
 
     let initial_state = backend.init_state(graph, &partition);
     let current_score = backend.initial_score(graph, &partition, &initial_state);
@@ -683,6 +721,7 @@ where
                     worker_backend,
                     rule,
                     maximize,
+                    t_idx,
                     rng_seed,
                     node_ub,
                     job_recv,
@@ -692,7 +731,7 @@ where
         }
 
         let mut state = TiltedMainState::<B::State>::new(partition, initial_state, current_score);
-        run_tilted_main_loop(
+        let worker_result = run_tilted_main_loop(
             graph,
             &backend,
             &mut state,
@@ -730,6 +769,7 @@ where
             .unwrap();
         }
         stop_tilted_workers(&job_sends);
+        worker_result?;
         Ok(state.partition)
     });
 

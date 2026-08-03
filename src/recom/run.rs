@@ -7,6 +7,7 @@
 //! Currently, there is only one runner ([`multi_chain`]). This runner
 //! is multithreaded and prints accepted proposals to `stdout` in TSV format.
 //! It also collects rejection/self-loop statistics.
+use super::mst_diagnostics::{debug_directory, failure_message};
 use super::{
     make_sampler, node_bound, random_split, sample_dist_pair, RecomParams, RecomProposal,
     RecomVariant, WorkerBuffers,
@@ -43,6 +44,8 @@ struct ResultPacket {
     counts: SelfLoopCounts,
     /// ≥0 valid proposals generated within the unit of work.
     proposals: Vec<(u64, RecomProposal)>,
+    /// Fatal spanning-tree error, if this worker could not finish the batch.
+    error: Option<String>,
 }
 
 /// Information necessary to compute statistics about an accepted proposal.
@@ -117,6 +120,7 @@ fn start_job_thread<C>(
     graph: &Graph,
     mut partition: Partition,
     params: RecomParams,
+    worker_index: usize,
     rng_seed: u64,
     buf_size: usize,
     job_recv: Receiver<JobPacket>,
@@ -131,9 +135,15 @@ fn start_job_thread<C>(
     let mut buffers = WorkerBuffers::new((), n, buf_size, params.balance_ub);
     let mut st_sampler = make_sampler(&params, buf_size, &mut rng);
     let reversible = params.variant == RecomVariant::Reversible;
+    let debug_directory = debug_directory();
 
     let mut next: JobPacket = job_recv.recv().unwrap();
     while !next.terminate {
+        let previous_assignment = if debug_directory.is_some() && next.diff.is_some() {
+            Some(partition.assignments.clone())
+        } else {
+            None
+        };
         if let Some(diff) = next.diff {
             partition.update(&diff);
             constraint.apply_proposal(graph, &mut constraint_state, &diff);
@@ -171,13 +181,33 @@ fn start_job_thread<C>(
 
                 // Step 2: draw a random spanning tree of the subgraph induced by the
                 // two districts.
-                st_sampler.random_spanning_tree_with_parent(
+                if let Err(error) = st_sampler.random_spanning_tree_with_parent(
                     &buffers.subgraph.graph,
                     &graph,
                     &buffers.subgraph.raw_nodes,
                     &mut buffers.spanning_tree,
                     &mut rng,
-                );
+                ) {
+                    let error = failure_message(
+                        debug_directory.as_deref(),
+                        "chain",
+                        worker_index,
+                        rng_seed,
+                        params.variant,
+                        &error,
+                        previous_assignment.as_deref(),
+                        &partition,
+                        dist_a,
+                        dist_b,
+                        &buffers.subgraph,
+                    );
+                    let _ = result_send.send(ResultPacket {
+                        counts,
+                        proposals,
+                        error: Some(error),
+                    });
+                    return;
+                }
 
                 // Step 3: choose a random balance edge, if possible.
                 let split = random_split(
@@ -242,6 +272,7 @@ fn start_job_thread<C>(
             .send(ResultPacket {
                 counts: counts,
                 proposals: proposals,
+                error: None,
             })
             .unwrap();
         next = job_recv.recv().unwrap();
@@ -259,12 +290,11 @@ fn next_batch(send: &Sender<JobPacket>, diff: Option<RecomProposal>, batch_size:
 
 /// Stops a ReCom job thread.
 fn stop_job_thread(send: &Sender<JobPacket>) {
-    send.send(JobPacket {
+    let _ = send.send(JobPacket {
         n_steps: 0,
         diff: None,
         terminate: true,
-    })
-    .unwrap();
+    });
 }
 
 /// Runs a multi-threaded ReCom chain.
@@ -405,6 +435,7 @@ where
                     graph,
                     worker_partition,
                     params.clone(),
+                    t_idx,
                     rng_seed,
                     node_ub,
                     job_recv,
@@ -434,11 +465,23 @@ where
         while step < effective_steps {
             let mut counts = SelfLoopCounts::default();
             let mut proposals = Vec::<(u64, RecomProposal)>::new();
+            let mut worker_error = None;
             // This is where the proposals are assigned
             for _ in 0..n_threads {
                 let packet: ResultPacket = result_recv.recv().unwrap();
+                if let Some(error) = packet.error {
+                    worker_error.get_or_insert(error);
+                    continue;
+                }
                 counts = counts + packet.counts;
                 proposals.extend(packet.proposals);
+            }
+            if let Some(error) = worker_error {
+                for job in &job_sends {
+                    stop_job_thread(job);
+                }
+                stop_stats_thread(&stats_send);
+                return Err(error);
             }
 
             let mut loops = counts.sum();

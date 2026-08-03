@@ -38,6 +38,7 @@ use super::writers::{start_burst_score_writer, start_burst_stats_writer};
 use crate::buffers::graph_connected_buffered;
 use crate::graph::Graph;
 use crate::partition::Partition;
+use crate::recom::mst_diagnostics::{debug_directory, failure_message};
 use crate::spanning_tree::SpanningTreeSampler;
 use crate::stats::{ScoresWriter, StatsWriter};
 use crossbeam::scope;
@@ -70,7 +71,11 @@ fn draw_burst_proposal<B>(
     st_sampler: &mut Box<dyn SpanningTreeSampler>,
     backend: &B,
     rng: &mut SmallRng,
-) -> ScoredProposal
+    debug_directory: Option<&std::path::Path>,
+    previous_assignment: Option<&[u32]>,
+    worker_index: usize,
+    rng_seed: u64,
+) -> Result<ScoredProposal, String>
 where
     B: ScoringBackend,
 {
@@ -82,13 +87,27 @@ where
         if !graph_connected_buffered(&buffers.subgraph.graph, &mut buffers.connectivity) {
             continue;
         }
-        st_sampler.random_spanning_tree_with_parent(
+        if let Err(error) = st_sampler.random_spanning_tree_with_parent(
             &buffers.subgraph.graph,
             graph,
             &buffers.subgraph.raw_nodes,
             &mut buffers.spanning_tree,
             rng,
-        );
+        ) {
+            return Err(failure_message(
+                debug_directory,
+                "short-bursts",
+                worker_index,
+                rng_seed,
+                params.variant,
+                &error,
+                previous_assignment,
+                partition,
+                dist_a,
+                dist_b,
+                &buffers.subgraph,
+            ));
+        }
         let split = random_split(
             &buffers.subgraph.graph,
             graph,
@@ -115,11 +134,11 @@ where
             &mut buffers.scratch,
             &buffers.proposal,
         );
-        return ScoredProposal {
+        return Ok(ScoredProposal {
             id: rng.random::<u64>(),
             proposal: buffers.proposal.clone(),
             score,
-        };
+        });
     }
 }
 
@@ -135,6 +154,7 @@ fn run_burst_worker<B>(
     mut state: B::State,
     params: RecomParams,
     backend: B,
+    worker_index: usize,
     rng_seed: u64,
     buf_size: usize,
     job_recv: Receiver<BurstJobPacket>,
@@ -151,10 +171,18 @@ fn run_burst_worker<B>(
         params.balance_ub,
     );
     let mut st_sampler = make_sampler(&params, buf_size, &mut rng);
+    let debug_directory = debug_directory();
 
     let mut next: BurstJobPacket = job_recv.recv().unwrap();
     while !next.terminate {
-        match std::mem::replace(&mut next.diff, BurstDiff::None) {
+        let diff = std::mem::replace(&mut next.diff, BurstDiff::None);
+        let previous_assignment = if debug_directory.is_some() && !matches!(&diff, BurstDiff::None)
+        {
+            Some(partition.assignments.clone())
+        } else {
+            None
+        };
+        match diff {
             BurstDiff::None => {}
             BurstDiff::Apply(proposal) => {
                 backend.apply_accepted(graph, &mut partition, &mut state, &proposal);
@@ -174,8 +202,16 @@ fn run_burst_worker<B>(
             &mut st_sampler,
             &backend,
             &mut rng,
+            debug_directory.as_deref(),
+            previous_assignment.as_deref(),
+            worker_index,
+            rng_seed,
         );
-        result_send.send(BurstResult { proposal }).unwrap();
+        let failed = proposal.is_err();
+        let _ = result_send.send(BurstResult { proposal });
+        if failed {
+            return;
+        }
         next = job_recv.recv().unwrap();
     }
 }
@@ -355,6 +391,7 @@ where
                     worker_state,
                     params.clone(),
                     worker_backend,
+                    t_idx,
                     rng_seed,
                     node_ub,
                     job_recv,
@@ -390,16 +427,25 @@ where
         let mut writer_step: u64 = 0;
         // Total accepted chain steps so far.
         let mut step: u64 = 0;
+        let mut worker_error = None;
 
         // Main-thread RNG, used to pick which worker's proposal to apply
         // each round (matches the random-pick interleaving in `run.rs`).
         let mut main_rng: SmallRng = SeedableRng::seed_from_u64(params.rng_seed);
 
-        while step < effective_records {
+        while step < effective_records && worker_error.is_none() {
             // Collect one proposal from every worker.
             let mut proposals: Vec<ScoredProposal> = Vec::with_capacity(n_threads);
             for _ in 0..n_threads {
-                proposals.push(result_recv.recv().unwrap().proposal);
+                match result_recv.recv().unwrap().proposal {
+                    Ok(proposal) => proposals.push(proposal),
+                    Err(error) => {
+                        worker_error.get_or_insert(error);
+                    }
+                }
+            }
+            if worker_error.is_some() {
+                continue;
             }
             // Sort by random ID so the random pick is reproducible across
             // arrival orders (same technique as `run.rs`).
@@ -526,7 +572,10 @@ where
             .unwrap();
         }
 
-        Ok(global_best_partition)
+        match worker_error {
+            Some(error) => Err(error),
+            None => Ok(global_best_partition),
+        }
     });
 
     if let Some(pb) = progress_bar {

@@ -82,12 +82,11 @@ pub(super) fn send_tilted_jobs(
 /// Stops all tilted-run worker threads.
 pub(super) fn stop_tilted_workers(job_sends: &[Sender<TiltedJobPacket>]) {
     for job in job_sends.iter() {
-        job.send(TiltedJobPacket {
+        let _ = job.send(TiltedJobPacket {
             diff: None,
             current_score: 0.0,
             terminate: true,
-        })
-        .unwrap();
+        });
     }
 }
 
@@ -96,17 +95,27 @@ pub(super) fn stop_tilted_workers(job_sends: &[Sender<TiltedJobPacket>]) {
 /// Returns the total number of tilted rejections and all worker-accepted
 /// proposals for this round.
 pub(super) fn collect_tilted_results(
-    result_recv: &Receiver<TiltedResultPacket>,
+    result_recv: &Receiver<Result<TiltedResultPacket, String>>,
     n_threads: usize,
-) -> (usize, Vec<ScoredProposal>) {
+) -> Result<(usize, Vec<ScoredProposal>), String> {
     let mut rejections = 0;
     let mut proposals = Vec::<ScoredProposal>::new();
+    let mut worker_error = None;
 
     for _ in 0..n_threads {
-        let packet = result_recv.recv().unwrap();
-        rejections += packet.rejections;
-        proposals.extend(packet.proposals);
+        match result_recv.recv().unwrap() {
+            Ok(packet) => {
+                rejections += packet.rejections;
+                proposals.extend(packet.proposals);
+            }
+            Err(error) => {
+                worker_error.get_or_insert(error);
+            }
+        }
     }
 
-    (rejections, proposals)
+    match worker_error {
+        Some(error) => Err(error),
+        None => Ok((rejections, proposals)),
+    }
 }
