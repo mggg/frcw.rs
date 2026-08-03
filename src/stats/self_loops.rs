@@ -14,6 +14,11 @@ pub enum SelfLoopReason {
     /// Probabilistic rejection based on seam length
     /// (reversible ReCom only).
     SeamLength,
+    /// Probabilistic rejection based on objective score
+    /// (tilted runs only).
+    TiltedRejection,
+    /// Constraint violation (e.g., compactness, population, etc.).
+    ConstraintViolation,
 }
 
 /// Self-loop statistics since the last accepted proposal.
@@ -46,6 +51,11 @@ impl SelfLoopCounts {
     /// Increments the self-loop count (with a reason).
     pub fn inc(&mut self, reason: SelfLoopReason) {
         *self.counts.entry(reason).or_insert(0) += 1;
+    }
+
+    /// Increments the self-loop count by `count` (with a reason).
+    pub fn inc_by(&mut self, reason: SelfLoopReason, count: usize) {
+        *self.counts.entry(reason).or_insert(0) += count;
     }
 
     /// Decrements the self-loop count (with a reason).
@@ -95,6 +105,8 @@ impl Serialize for SelfLoopCounts {
                 SelfLoopReason::NonAdjacent => "non_adjacent",
                 SelfLoopReason::NoSplit => "no_split",
                 SelfLoopReason::SeamLength => "seam_length",
+                SelfLoopReason::TiltedRejection => "tilted_rejection",
+                SelfLoopReason::ConstraintViolation => "constraint_violation",
             };
             state.serialize_field(key, count)?;
         }

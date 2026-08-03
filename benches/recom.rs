@@ -1,19 +1,13 @@
-use criterion::{criterion_group, criterion_main, Criterion};
-use frcw::graph::Graph;
-use frcw::partition::Partition;
-use frcw::recom::run::multi_chain;
-use frcw::recom::{RecomParams, RecomProposal, RecomVariant};
-use frcw::stats::{SelfLoopCounts, StatsWriter};
-use std::default::Default;
 /// ReCom chain benchmarks.
-use std::time::Instant;
-use test_fixtures::default_fixture;
-
-/// RNG seed for all benchmarks.
-const RNG_SEED: u64 = 153434375;
+use rustrecom::graph::Graph;
+use rustrecom::partition::Partition;
+use rustrecom::recom::RecomProposal;
+use rustrecom::stats::{SelfLoopCounts, StatsWriter};
+use std::default::Default;
 
 /// A `StatsWriter` that does nothing.
 #[derive(Default)]
+#[allow(dead_code)]
 struct DummyWriter {}
 
 impl StatsWriter for DummyWriter {

@@ -1,4 +1,4 @@
-//! Reversible ReCom distribution test for the frcw engine.
+//! Reversible ReCom distribution test for the rustrecom engine.
 //!
 //! Intended for use with the MGGG benchmark suite
 //! (https://github.com/mggg/benchmarks).
@@ -7,18 +7,18 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 use clap::{value_parser, Arg, Command};
-use frcw::graph::Graph;
-use frcw::partition::Partition;
-use frcw::recom::run::multi_chain;
-use frcw::recom::{RecomParams, RecomVariant};
-use frcw::stats::{AssignmentsOnlyWriter, StatsWriter};
+use rustrecom::graph::Graph;
+use rustrecom::partition::Partition;
+use rustrecom::recom::run::multi_chain;
+use rustrecom::recom::{RecomParams, RecomVariant};
+use rustrecom::stats::{AssignmentsOnlyWriter, StatsWriter};
 use std::fs::read_to_string;
 
 fn main() {
-    let matches = Command::new("frcw-revrecom-dist-test")
-        .version("0.1.3")
+    let matches = Command::new("rustrecom-revrecom-dist-test")
+        .version(env!("CARGO_PKG_VERSION"))
         .author("Parker J. Rule <parker.rule@tufts.edu>")
-        .about("RevReCom distribution tests for frcw")
+        .about("RevReCom distribution tests for rustrecom")
         .arg(
             Arg::new("graph_file")
                 .long("graph-file")
@@ -131,6 +131,7 @@ fn main() {
         balance_ub: balance_ub,
         variant: RecomVariant::Reversible,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
 
     let output_buffer = Box::new(std::io::BufWriter::new(std::io::stdout()));

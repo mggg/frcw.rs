@@ -6,7 +6,7 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 use clap::{value_parser, Arg, Command};
-// use frcw::init::graph_from_networkx;
+// use rustrecom::init::graph_from_networkx;
 use petgraph::graph::{Graph, NodeIndex};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -16,7 +16,7 @@ use std::io::{self, BufRead};
 
 fn main() {
     let cli = Command::new("gerryql")
-        .version("0.1.3")
+        .version(env!("CARGO_PKG_VERSION"))
         .author("Parker J. Rule <parker.rule@tufts.edu>")
         .about("A query engine for statistics on long Markov chain runs.")
         .arg(

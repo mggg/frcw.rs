@@ -1,9 +1,9 @@
 // Functional tests that verify ReCom chain invariants at each step.
-use frcw::graph::Graph;
-use frcw::partition::Partition;
-use frcw::recom::run::multi_chain;
-use frcw::recom::{RecomParams, RecomProposal, RecomVariant};
-use frcw::stats::{SelfLoopCounts, StatsWriter};
+use rustrecom::graph::Graph;
+use rustrecom::partition::Partition;
+use rustrecom::recom::run::multi_chain;
+use rustrecom::recom::{RecomParams, RecomProposal, RecomVariant};
+use rustrecom::stats::{SelfLoopCounts, StatsWriter};
 use std::collections::HashSet;
 use std::io::Result as IOResult;
 use std::iter::FromIterator;
@@ -297,9 +297,12 @@ fn test_chain_invariants_recom_grid(
         balance_ub: 0,
         variant: variant,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let writer = Box::new(StepInvariantWriter::new(params.clone(), true)) as Box<dyn StatsWriter>;
-    multi_chain(&graph, &partition, writer, &params, n_threads, batch_size);
+    let _ = multi_chain(
+        &graph, &partition, writer, &params, n_threads, batch_size, false,
+    );
 }
 
 #[rstest]
@@ -318,9 +321,12 @@ fn test_chain_invariants_revrecom_grid(
         balance_ub: pop_range.1 - pop_range.0 + 1,
         variant: RecomVariant::Reversible,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let writer = Box::new(StepInvariantWriter::new(params.clone(), true)) as Box<dyn StatsWriter>;
-    multi_chain(&graph, &partition, writer, &params, n_threads, batch_size);
+    let _ = multi_chain(
+        &graph, &partition, writer, &params, n_threads, batch_size, false,
+    );
 }
 
 #[rstest]
@@ -340,17 +346,20 @@ fn test_chain_invariants_recom_iowa(
         balance_ub: 0,
         variant: variant,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let writer = Box::new(StepInvariantWriter::new(params.clone(), true)) as Box<dyn StatsWriter>;
-    multi_chain(&graph, &partition, writer, &params, n_threads, batch_size);
+    let _ = multi_chain(
+        &graph, &partition, writer, &params, n_threads, batch_size, false,
+    );
 }
 
 #[rstest]
 fn test_chain_invariants_revrecom_iowa(
     #[values((0.01, 10), (0.2, 20))] pop_tol_balance_ub: (f64, u32),
     #[values(1, 4)] n_threads: usize,
-    #[values(1,24)] batch_size: usize,   // Peter note: This will fail when the batch size is exactly 16. 
-                                         // All other values from 1-32 pass. This should be investigated.
+    #[values(1, 24)] batch_size: usize, // Peter note: This will fail when the batch size is exactly 16.
+                                        // All other values from 1-32 pass. This should be investigated.
 ) {
     let (graph, partition) = default_fixture("IA");
     let avg_pop = (graph.total_pop as f64) / (partition.num_dists as f64);
@@ -364,13 +373,15 @@ fn test_chain_invariants_revrecom_iowa(
         balance_ub: balance_ub,
         variant: RecomVariant::Reversible,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let writer = Box::new(StepInvariantWriter::new(params.clone(), true)) as Box<dyn StatsWriter>;
-    multi_chain(&graph, &partition, writer, &params, n_threads, batch_size);
+    let _ = multi_chain(
+        &graph, &partition, writer, &params, n_threads, batch_size, false,
+    );
 }
 
 #[rstest]
-#[ignore]
 fn test_chain_invariants_revrecom_large_states(
     #[values("PA", "VA")] state: &str,
     #[values(25000)] num_steps: u64,
@@ -388,7 +399,10 @@ fn test_chain_invariants_revrecom_large_states(
         balance_ub: 30,
         variant: RecomVariant::Reversible,
         region_weights: None,
+        edge_weight_keys: vec![],
     };
     let writer = Box::new(StepInvariantWriter::new(params.clone(), false)) as Box<dyn StatsWriter>;
-    multi_chain(&graph, &partition, writer, &params, n_threads, batch_size);
+    let _ = multi_chain(
+        &graph, &partition, writer, &params, n_threads, batch_size, false,
+    );
 }

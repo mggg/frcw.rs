@@ -9,8 +9,8 @@ use crate::recom::RecomProposal;
 pub enum PartitionError {
     #[snafu(display("Empty assignment vector"))]
     ErrEmptyAssignmentVector,
-    #[snafu(display("Assignments must be 1-indexed"))]
-    ErrAssignmentVectorNotOneIndexed,
+    #[snafu(display("Assignments must be 0- or 1-indexed"))]
+    ErrAssignmentVectorNotZeroOrOneIndexed,
     #[snafu(display("District {district_number} has no nodes"))]
     ErrDistrictHasNoNodes { district_number: usize },
     #[snafu(display(
@@ -67,6 +67,72 @@ impl Partition {
         // Reset lazily computed derived properties.
         self.cut_edges = None;
         self.dist_adj = None;
+    }
+
+    /// Applies a proposal and, if `dist_adj` is already cached, patches it in
+    /// place rather than invalidating it. Use from hot paths that call
+    /// `dist_adj` every draw so the cache survives every accepted proposal.
+    ///
+    /// `cut_edges` is still invalidated because it is not needed by the tilted
+    /// runner.
+    pub fn update_with_dist_adj(&mut self, proposal: &RecomProposal, graph: &Graph) {
+        if self.dist_adj.is_none() {
+            self.update(proposal);
+            return;
+        }
+
+        let num_dists = self.num_dists as usize;
+        let n = self.assignments.len();
+        let mut affected = vec![false; n];
+        for &node in proposal.a_nodes.iter() {
+            affected[node] = true;
+        }
+        for &node in proposal.b_nodes.iter() {
+            affected[node] = true;
+        }
+
+        let dist_adj = self.dist_adj.as_mut().unwrap();
+        for &node in proposal.a_nodes.iter().chain(proposal.b_nodes.iter()) {
+            let d_node = self.assignments[node] as usize;
+            for &nbr in graph.neighbors[node].iter() {
+                if affected[nbr] && nbr < node {
+                    continue;
+                }
+                let d_nbr = self.assignments[nbr] as usize;
+                if d_node != d_nbr {
+                    dist_adj[d_node * num_dists + d_nbr] -= 1;
+                    dist_adj[d_nbr * num_dists + d_node] -= 1;
+                }
+            }
+        }
+
+        self.dist_nodes[proposal.a_label] = proposal.a_nodes.clone();
+        self.dist_nodes[proposal.b_label] = proposal.b_nodes.clone();
+        self.dist_pops[proposal.a_label] = proposal.a_pop;
+        self.dist_pops[proposal.b_label] = proposal.b_pop;
+        for &node in proposal.a_nodes.iter() {
+            self.assignments[node] = proposal.a_label as u32;
+        }
+        for &node in proposal.b_nodes.iter() {
+            self.assignments[node] = proposal.b_label as u32;
+        }
+
+        let dist_adj = self.dist_adj.as_mut().unwrap();
+        for &node in proposal.a_nodes.iter().chain(proposal.b_nodes.iter()) {
+            let d_node = self.assignments[node] as usize;
+            for &nbr in graph.neighbors[node].iter() {
+                if affected[nbr] && nbr < node {
+                    continue;
+                }
+                let d_nbr = self.assignments[nbr] as usize;
+                if d_node != d_nbr {
+                    dist_adj[d_node * num_dists + d_nbr] += 1;
+                    dist_adj[d_nbr * num_dists + d_node] += 1;
+                }
+            }
+        }
+
+        self.cut_edges = None;
     }
 
     /// Computes the partition's cut edges.
@@ -193,15 +259,18 @@ impl Partition {
         self.subgraph_with_attr_subset(graph, buf, graph.attr.keys(), a, b);
     }
 
-    /// Builds a partition from a 1-indexed assignment vector.
+    /// Builds a partition from a 0- or 1-indexed assignment vector. The labels
+    /// must be consecutive (every value between the min and max is used); a gap
+    /// surfaces as [`PartitionError::ErrDistrictHasNoNodes`].
     pub fn from_assignments(
         graph: &Graph,
         assignments: &Vec<u32>,
     ) -> Result<Partition, PartitionError> {
-        match assignments.iter().min() {
+        // The min doubles as the index base we subtract to normalize to 0.
+        let offset = match assignments.iter().min() {
             None => return Err(PartitionError::ErrEmptyAssignmentVector),
-            Some(1) => (),
-            Some(_) => return Err(PartitionError::ErrAssignmentVectorNotOneIndexed),
+            Some(&min) if min == 0 || min == 1 => min,
+            Some(_) => return Err(PartitionError::ErrAssignmentVectorNotZeroOrOneIndexed),
         };
 
         if assignments.len() != graph.neighbors.len() {
@@ -211,10 +280,10 @@ impl Partition {
             });
         }
 
-        let num_dists = *assignments.iter().max().unwrap(); // guaranteed nonempty
+        let num_dists = *assignments.iter().max().unwrap() - offset + 1; // guaranteed nonempty
         let mut dist_nodes = vec![Vec::<usize>::new(); num_dists as usize];
         let mut dist_pops = vec![0 as u32; num_dists as usize];
-        let assignments_zeroed = assignments.iter().map(|a| a - 1).collect::<Vec<u32>>();
+        let assignments_zeroed = assignments.iter().map(|a| a - offset).collect::<Vec<u32>>();
         for (node, &assignment) in assignments_zeroed.iter().enumerate() {
             assert!(assignment < num_dists);
             dist_nodes[assignment as usize].push(node);
@@ -222,8 +291,9 @@ impl Partition {
         }
         for (dist, nodes) in dist_nodes.iter().enumerate() {
             if nodes.is_empty() {
+                // Report the gap in the input's own indexing.
                 return Err(PartitionError::ErrDistrictHasNoNodes {
-                    district_number: dist + 1,
+                    district_number: dist + offset as usize,
                 });
             }
         }
@@ -239,7 +309,7 @@ impl Partition {
     }
 
     /// Builds a partition from a space-delimited string representing a
-    /// 1-indexed assignment vector.
+    /// 0- or 1-indexed assignment vector.
     pub fn from_assignment_str(
         graph: &Graph,
         assignments: &str,
@@ -279,9 +349,24 @@ mod tests {
     fn from_assignments_zero_indexed() {
         let grid = Graph::rect_grid(2, 2);
         let assignments = vec![0, 0, 0, 1];
+        let mut partition = Partition::from_assignments(&grid, &assignments).unwrap();
+        // Normalizes to the same internal 0-indexed form as `[1, 1, 1, 2]`.
+        assert_eq!(partition.num_dists, 2);
+        assert_eq!(partition.assignments, vec![0, 0, 0, 1]);
+        assert_eq!(partition.dist_pops, vec![3, 1]);
+        assert_eq!(partition.dist_nodes, vec![vec![0, 1, 2], vec![3]]);
+        assert_eq!(*partition.dist_adj(&grid), vec![0, 2, 2, 0]);
+        assert_eq!(*partition.cut_edges(&grid), vec![2, 3]);
+    }
+
+    #[test]
+    fn from_assignments_zero_indexed_missing_district() {
+        let grid = Graph::rect_grid(2, 2);
+        // 0-indexed but non-consecutive: label 1 is unused.
+        let assignments = vec![0, 0, 0, 2];
         assert_eq!(
             Partition::from_assignments(&grid, &assignments).unwrap_err(),
-            PartitionError::ErrAssignmentVectorNotOneIndexed
+            PartitionError::ErrDistrictHasNoNodes { district_number: 1 }
         );
     }
 
@@ -291,7 +376,7 @@ mod tests {
         let assignments = vec![2, 2, 2, 3];
         assert_eq!(
             Partition::from_assignments(&grid, &assignments).unwrap_err(),
-            PartitionError::ErrAssignmentVectorNotOneIndexed
+            PartitionError::ErrAssignmentVectorNotZeroOrOneIndexed
         );
     }
 
@@ -351,5 +436,71 @@ mod tests {
                 parse_error: "invalid digit found in string".to_string()
             }
         );
+    }
+
+    #[test]
+    fn update_with_dist_adj_matches_full_rebuild() {
+        let grid = Graph::rect_grid(4, 4);
+        let assignments: Vec<u32> = vec![1, 1, 2, 2, 1, 1, 2, 2, 3, 3, 4, 4, 3, 3, 4, 4];
+        let mut incremental = Partition::from_assignments(&grid, &assignments).unwrap();
+        let _ = incremental.dist_adj(&grid);
+
+        let proposal = RecomProposal {
+            a_label: 0,
+            b_label: 1,
+            a_pop: 4,
+            b_pop: 4,
+            a_nodes: vec![0, 1, 4, 5],
+            b_nodes: vec![2, 3, 6, 7],
+        };
+        incremental.update_with_dist_adj(&proposal, &grid);
+
+        let mut reference = Partition::from_assignments(&grid, &assignments).unwrap();
+        reference.update(&proposal);
+        let expected = reference.dist_adj(&grid).clone();
+        assert_eq!(incremental.dist_adj.as_ref().unwrap(), &expected);
+        assert_eq!(incremental.assignments, reference.assignments);
+        assert_eq!(incremental.dist_nodes, reference.dist_nodes);
+        assert_eq!(incremental.dist_pops, reference.dist_pops);
+
+        let proposal2 = RecomProposal {
+            a_label: 2,
+            b_label: 3,
+            a_pop: 4,
+            b_pop: 4,
+            a_nodes: vec![8, 9, 10, 11],
+            b_nodes: vec![12, 13, 14, 15],
+        };
+        incremental.update_with_dist_adj(&proposal2, &grid);
+
+        let mut reference2 = Partition::from_assignments(&grid, &assignments).unwrap();
+        reference2.update(&proposal);
+        reference2.update(&proposal2);
+        let expected2 = reference2.dist_adj(&grid).clone();
+        assert_eq!(incremental.dist_adj.as_ref().unwrap(), &expected2);
+    }
+
+    #[test]
+    fn update_with_dist_adj_patches_cross_pair_edges() {
+        let grid = Graph::rect_grid(4, 4);
+        let assignments: Vec<u32> = vec![1, 1, 2, 2, 1, 1, 2, 2, 3, 3, 4, 4, 3, 3, 4, 4];
+        let mut incremental = Partition::from_assignments(&grid, &assignments).unwrap();
+        let _ = incremental.dist_adj(&grid);
+
+        // Move node 5 from district 0 to district 1 by swapping the pair's membership.
+        let proposal = RecomProposal {
+            a_label: 0,
+            b_label: 1,
+            a_pop: 3,
+            b_pop: 5,
+            a_nodes: vec![0, 1, 4],
+            b_nodes: vec![2, 3, 5, 6, 7],
+        };
+        incremental.update_with_dist_adj(&proposal, &grid);
+
+        let mut reference = Partition::from_assignments(&grid, &assignments).unwrap();
+        reference.update(&proposal);
+        let expected = reference.dist_adj(&grid).clone();
+        assert_eq!(incremental.dist_adj.as_ref().unwrap(), &expected);
     }
 }
